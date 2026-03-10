@@ -1,0 +1,74 @@
+{
+  "projectType": "frontend",
+  "projectName": "SMP Simulator",
+  "projectDescription": "Educational browser-based simulator for symmetric multiprocessing systems with MSI cache coherence and real-time performance metrics.",
+  "theme": "aspen",
+  "primaryColor": "#7be0b3",
+  "lightColor": "#82a0ff",
+  "darkColor": "#0c1021",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "running-simulator"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/smp-system",
+              "architecture/pipeline",
+              "architecture/cache-coherence",
+              "architecture/branch-prediction"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/workloads",
+              "configuration/parameters",
+              "configuration/metrics"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Modules",
+            "pages": [
+              "api/processor",
+              "api/pipeline",
+              "api/cache",
+              "api/coherence-bus"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Configurable 2-4 core SMP system with in-order pipelines",
+    "MSI cache coherence protocol with private L1I/L1D caches",
+    "Real-time visualization of parallel execution and metrics",
+    "Multiple workloads (vector, matrix multiplication, histogram, control flow)",
+    "gshare branch predictor with configurable history",
+    "Performance metrics: IPC, speedup, MPKI, branch accuracy"
+  ],
+  "publicApiSurface": [
+    "Processor class - Main SMP system orchestrator",
+    "Pipeline class - 5-stage in-order pipeline (IF, ID, EX, MEM, WB)",
+    "Cache class - Set-associative cache with MSI states",
+    "CoherenceBus class - MSI protocol coordinator with snoop/invalidate",
+    "CacheLine class - Individual cache line with tag and state",
+    "BranchPredictor class - gshare 2-bit saturating counter predictor"
+  ]
+}
