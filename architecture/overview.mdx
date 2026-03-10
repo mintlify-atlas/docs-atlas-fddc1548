@@ -1,0 +1,200 @@
+---
+title: Architecture Overview
+description: High-level architecture of the SMP simulator and component interaction
+---
+
+The SMP Simulator is a didactic HTML/CSS/JavaScript simulator that models a symmetric multiprocessing (SMP) system with 2-4 in-order cores, private L1 instruction and data caches, and MSI coherence protocol via a shared bus.
+
+## System Components
+
+The simulator consists of four main architectural components:
+
+1. **Processor** - Orchestrates the SMP system, manages cores, and calculates metrics
+2. **Pipeline** - 5-stage in-order pipeline with branch prediction (one per core)
+3. **Cache** - Set-associative L1I/L1D caches with MSI coherence states
+4. **CoherenceBus** - Implements bus snooping and MSI state transitions
+
+## Component Hierarchy
+
+```
+Processor
+├── CoherenceBus (shared)
+├── Core 0
+│   ├── Pipeline
+│   │   └── BranchPredictor (gshare)
+│   ├── L1I Cache (private)
+│   └── L1D Cache (private, connected to bus)
+├── Core 1
+│   ├── Pipeline
+│   │   └── BranchPredictor (gshare)
+│   ├── L1I Cache (private)
+│   └── L1D Cache (private, connected to bus)
+└── ... (up to 4 cores)
+```
+
+## Data Flow During Simulation
+
+The simulation follows a cycle-accurate execution model:
+
+### 1. Instruction Fetch (IF)
+
+- Pipeline fetches instruction from private L1I cache
+- L1I hit latency applied (configurable, default 1 cycle)
+- On miss, additional penalty added (default 15 cycles)
+
+### 2. Pipeline Execution
+
+- Instructions flow through 5 stages: IF → ID → EX → MEM → WB
+- Each stage processes one instruction per cycle (when ready)
+- Branch predictor consulted during EX stage
+- Memory operations access L1D cache during MEM stage
+
+### 3. Cache Access
+
+When a load/store reaches the MEM stage:
+
+```javascript
+// From pipeline.js:106-110
+if (instr.op === "load" || instr.op === "store") {
+  const { latency } = this.l1d.access(instr.addr, { 
+    isWrite: instr.op === "store", 
+    cycle 
+  });
+  instr.remaining = latency;
+}
+```
+
+### 4. Coherence Protocol
+
+On cache access, the CoherenceBus coordinates MSI state transitions:
+
+**Read miss:**
+- Bus snoops all other L1D caches
+- If shared, line allocated in S state
+- If exclusive, line allocated in S state (simplified model)
+
+**Write miss:**
+- Bus invalidates all copies in other caches
+- Line allocated in M state
+
+**Write hit to S:**
+- Bus sends upgrade request
+- All other copies invalidated
+- Line transitions S → M
+
+### 5. Metrics Collection
+
+The Processor aggregates statistics each cycle:
+
+```javascript
+// From processor.js:133-147
+step() {
+  if (this.done) return;
+  this.cycle++;
+  let committed = 0;
+  for (const core of this.cores) {
+    committed += core.pipe.step(this.cycle);
+  }
+  this.metrics.committed += committed;
+  // aggregate stats
+  const missSum = this.cores.reduce((acc, c) => acc + c.l1d.stats.misses, 0);
+  const branchHits = this.cores.reduce((acc, c) => acc + c.pipe.predictor.stats.hits, 0);
+  const branchTotal = this.cores.reduce((acc, c) => acc + c.pipe.predictor.stats.total, 0);
+  this.metrics.misses = missSum;
+  this.metrics.branch = { hits: branchHits, total: branchTotal };
+  this.metrics.coherenceMsgs = this.bus.stats.traffic + this.bus.stats.invalidations + this.bus.stats.upgrades;
+}
+```
+
+<Info>
+The simulation uses a **cycle-driven** model where all cores advance simultaneously each cycle, mimicking real hardware behavior.
+</Info>
+
+## Workload Distribution
+
+Workloads are partitioned across cores to generate parallelism and coherence traffic:
+
+```javascript
+// From processor.js:52-68
+perCore.forEach((core, idx) => {
+  // Use shared base so múltiplos núcleos tocam os mesmos blocos e geram coerência.
+  const base = 0;
+  switch (type) {
+    case "matmul":
+      emitMatmul(core, base);
+      break;
+    case "histograma":
+      emitHist(core, base);
+      break;
+    case "controle":
+      emitControle(core, base);
+      break;
+    default:
+      emitVec(core, base);
+  }
+});
+```
+
+All cores share the same base address (0x0000), creating overlapping memory access patterns that trigger coherence protocol activity.
+
+## Speedup Calculation
+
+The simulator calculates speedup against a single-core baseline:
+
+1. **Baseline simulation**: Run entire workload (all threads concatenated) on a single pipeline
+2. **SMP simulation**: Run partitioned workload across N cores in parallel
+3. **Speedup**: `baseline_cycles / smp_cycles`
+
+```javascript
+// From processor.js:73-86 (baseline)
+function simulateBaseline(instructions, cfg) {
+  const bus = new CoherenceBus();
+  const l1i = new Cache({ name: "L1I", sets: 32, ways: cfg.assoc, 
+                          hitLatency: cfg.l1iHit, missPenalty: cfg.missPenalty, 
+                          bus, isInstruction: true });
+  const l1d = new Cache({ name: "L1D", sets: 32, ways: cfg.assoc, 
+                          hitLatency: cfg.l1dHit, missPenalty: cfg.missPenalty, bus });
+  bus.register(l1d);
+  const pipe = new Pipeline(0, l1i, l1d, instructions, cfg.gshareBits);
+  let cycles = 0;
+  const max = 80000;
+  while (!pipe.done && cycles < max) {
+    pipe.step(cycles);
+    cycles++;
+  }
+  return cycles || 1;
+}
+```
+
+<Note>
+The baseline uses the **same cache configuration** as the SMP system to ensure a fair comparison. Only the number of cores differs.
+</Note>
+
+## Simulation Termination
+
+The simulation completes when:
+- All cores have fetched all instructions (PC ≥ instruction count)
+- All pipeline stages are empty (no in-flight instructions)
+
+```javascript
+// From processor.js:149-150
+const allDone = this.cores.every(c => c.pipe.done);
+if (allDone) this.done = true;
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SMP System" icon="microchip" href="/architecture/smp-system">
+    Explore core orchestration and workload partitioning
+  </Card>
+  <Card title="Pipeline" icon="arrow-progress" href="/architecture/pipeline">
+    Understand the 5-stage in-order execution model
+  </Card>
+  <Card title="Cache Coherence" icon="arrows-rotate" href="/architecture/cache-coherence">
+    Learn about MSI protocol and bus snooping
+  </Card>
+  <Card title="Branch Prediction" icon="code-branch" href="/architecture/branch-prediction">
+    Dive into the gshare predictor implementation
+  </Card>
+</CardGroup>

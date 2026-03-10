@@ -1,0 +1,321 @@
+---
+title: Pipeline
+description: 5-stage in-order pipeline with instruction fetch, decode, execute, memory, and writeback stages
+---
+
+## Overview
+
+The `Pipeline` class implements a classic 5-stage in-order pipeline (IF, ID, EX, MEM, WB) with support for:
+- Instruction and data cache integration
+- Branch prediction using gshare predictor
+- Pipeline stalls on cache misses
+- Branch misprediction penalties
+
+## Constructor
+
+```javascript
+new Pipeline(coreId, l1i, l1d, instructions, gshareBits)
+```
+
+<ParamField path="coreId" type="number" required>
+  Unique identifier for this core
+</ParamField>
+
+<ParamField path="l1i" type="Cache" required>
+  L1 instruction cache instance
+</ParamField>
+
+<ParamField path="l1d" type="Cache" required>
+  L1 data cache instance
+</ParamField>
+
+<ParamField path="instructions" type="Array" required>
+  Array of instruction objects to execute. Each instruction has:
+  - `op` - Operation type: `"load"`, `"store"`, `"alu"`, or `"branch"`
+  - `addr` - Memory address for the operation
+  - `takenProb` - Branch taken probability (for branch instructions)
+</ParamField>
+
+<ParamField path="gshareBits" type="number" default="6">
+  Number of bits for the gshare branch predictor history
+</ParamField>
+
+## Properties
+
+### id
+
+```javascript
+pipeline.id
+```
+
+Core identifier.
+
+### pc
+
+```javascript
+pipeline.pc
+```
+
+Program counter - index of the next instruction to fetch.
+
+### stages
+
+```javascript
+pipeline.stages
+```
+
+Object containing the current instruction in each pipeline stage:
+
+```javascript
+{
+  IF: null,   // Instruction Fetch
+  ID: null,   // Instruction Decode
+  EX: null,   // Execute
+  MEM: null,  // Memory Access
+  WB: null    // Writeback
+}
+```
+
+Each stage contains either `null` or an instruction object with:
+- `op` - Operation type
+- `addr` - Memory address
+- `remaining` - Cycles remaining before advancing
+- `stage` - Current stage name
+- `fetchSetup` / `memSetup` - Latency initialization flags
+
+### predictor
+
+```javascript
+pipeline.predictor
+```
+
+The `BranchPredictor` instance for this pipeline. See [Branch Predictor](#branch-predictor) section.
+
+### retired
+
+```javascript
+pipeline.retired
+```
+
+Number of instructions that have completed writeback.
+
+### done
+
+```javascript
+pipeline.done
+```
+
+Boolean indicating whether:
+1. All instructions have been fetched (`pc >= instructions.length`)
+2. All pipeline stages are empty
+
+## Methods
+
+### step(cycle)
+
+Advances the pipeline by one cycle.
+
+```javascript
+const committed = pipeline.step(cycle)
+```
+
+<ParamField path="cycle" type="number" required>
+  Current simulation cycle number
+</ParamField>
+
+**Returns:** Number of instructions committed this cycle (0 or 1).
+
+**Behavior:**
+1. Commits instruction in WB stage if present
+2. Advances instructions through pipeline stages (MEM→WB, EX→MEM, ID→EX, IF→ID)
+3. Handles flush cycles if branch was mispredicted
+4. Fetches new instruction into IF stage if available
+
+### advance(from, to, cycle)
+
+Advances an instruction from one stage to the next.
+
+```javascript
+pipeline.advance('EX', 'MEM', cycle)
+```
+
+<ParamField path="from" type="string" required>
+  Source stage: `"IF"`, `"ID"`, `"EX"`, `"MEM"`, or `"WB"`
+</ParamField>
+
+<ParamField path="to" type="string" required>
+  Destination stage: `"IF"`, `"ID"`, `"EX"`, `"MEM"`, or `"WB"`
+</ParamField>
+
+<ParamField path="cycle" type="number" required>
+  Current simulation cycle
+</ParamField>
+
+**Behavior:**
+- Initializes cache access latency when entering IF or MEM stages
+- Decrements remaining cycles each call
+- Performs branch prediction/resolution in EX stage
+- Moves instruction to next stage when `remaining` reaches 0
+
+### snapshot()
+
+Returns the current pipeline state for visualization.
+
+```javascript
+const snap = pipeline.snapshot()
+```
+
+**Returns:**
+
+```javascript
+{
+  pipeline: "IF:load | ID:- | EX:alu | MEM:- | WB:-",
+  pipelineStages: [
+    { stage: "IF", op: "load", busy: true },
+    { stage: "ID", op: "-", busy: false },
+    { stage: "EX", op: "alu", busy: true },
+    { stage: "MEM", op: "-", busy: false },
+    { stage: "WB", op: "-", busy: false }
+  ],
+  current: "alu"  // Operation currently in EX/ID/IF stage
+}
+```
+
+## Branch Predictor
+
+The `BranchPredictor` class implements a gshare predictor with 2-bit saturating counters.
+
+### Constructor
+
+```javascript
+new BranchPredictor(bits)
+```
+
+<ParamField path="bits" type="number" default="6">
+  Number of bits for global history register and prediction table index
+</ParamField>
+
+### Properties
+
+```javascript
+predictor.bits        // Number of history bits
+predictor.mask        // Bit mask: (1 << bits) - 1
+predictor.table       // Array of 2-bit counters (0-3)
+predictor.ghr         // Global History Register
+predictor.stats       // { hits: 0, total: 0 }
+```
+
+### Methods
+
+#### predict(pc)
+
+Predicts whether a branch will be taken.
+
+```javascript
+const willTake = predictor.predict(pc)
+```
+
+**Returns:** `true` if branch predicted taken (counter >= 2), `false` otherwise.
+
+**Algorithm:**
+```javascript
+index = (pc ^ ghr) & mask
+return table[index] >= 2
+```
+
+#### update(pc, taken)
+
+Updates the predictor with actual branch outcome.
+
+```javascript
+predictor.update(pc, taken)
+```
+
+**Behavior:**
+- Increments counter (max 3) if branch was taken
+- Decrements counter (min 0) if branch was not taken
+- Updates global history register: `ghr = ((ghr << 1) | taken) & mask`
+
+## Example
+
+```javascript
+import { Pipeline } from './modules/pipeline.js';
+import { Cache, CoherenceBus } from './modules/cache.js';
+
+// Create caches
+const bus = new CoherenceBus();
+const l1i = new Cache({
+  name: 'L1I-0',
+  sets: 32,
+  ways: 2,
+  hitLatency: 1,
+  missPenalty: 15,
+  isInstruction: true
+});
+
+const l1d = new Cache({
+  name: 'L1D-0',
+  sets: 32,
+  ways: 2,
+  hitLatency: 2,
+  missPenalty: 15
+});
+bus.register(l1d);
+
+// Define workload
+const instructions = [
+  { op: 'load', addr: 0x1000 },
+  { op: 'load', addr: 0x1004 },
+  { op: 'alu', addr: 0x1008 },
+  { op: 'store', addr: 0x1010 },
+  { op: 'branch', addr: 0x1020, takenProb: 0.8 }
+];
+
+// Create pipeline
+const pipeline = new Pipeline(0, l1i, l1d, instructions, 6);
+
+// Execute
+let cycle = 0;
+while (!pipeline.done) {
+  const committed = pipeline.step(cycle);
+  
+  // Visualize pipeline state
+  const snap = pipeline.snapshot();
+  console.log(`Cycle ${cycle}: ${snap.pipeline}`);
+  
+  if (committed > 0) {
+    console.log(`  → Retired instruction #${pipeline.retired}`);
+  }
+  
+  cycle++;
+}
+
+console.log(`\nCompleted in ${cycle} cycles`);
+console.log(`Instructions retired: ${pipeline.retired}`);
+console.log(`Branch prediction accuracy: ${(pipeline.predictor.stats.hits / pipeline.predictor.stats.total * 100).toFixed(1)}%`);
+```
+
+## Pipeline Stages
+
+### IF (Instruction Fetch)
+- Accesses L1I cache to fetch instruction
+- Cache latency determines stall cycles
+- Flushed on branch misprediction
+
+### ID (Instruction Decode)
+- Instruction decode (simplified - no actual decoding)
+- Flushed on branch misprediction
+
+### EX (Execute)
+- Performs branch prediction and resolution
+- Mispredictions trigger 2-cycle flush of IF/ID stages
+- ALU operations complete here
+
+### MEM (Memory Access)
+- Accesses L1D cache for loads/stores
+- Cache latency determines stall cycles
+- Coherence operations occur during L1D access
+
+### WB (Writeback)
+- Instruction commits and retires
+- Increments `retired` counter

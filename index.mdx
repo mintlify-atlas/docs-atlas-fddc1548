@@ -1,97 +1,56 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "SMP Simulator"
+description: "Educational browser-based simulator for symmetric multiprocessing systems with MSI cache coherence and real-time performance metrics"
 ---
 
-## Setting up
+<Note>
+This is an educational tool for learning about symmetric multiprocessing (SMP) architectures, cache coherence protocols, and pipeline execution.
+</Note>
 
-Get your documentation site up and running in minutes.
+## Welcome to SMP Simulator
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+The SMP Simulator is a browser-based educational tool that visualizes symmetric multiprocessing systems with 2-4 in-order cores, private L1 instruction and data caches, and MSI cache coherence protocol implementation.
 
-## Make it yours
+## Key Features
 
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Configurable SMP System" icon="microchip" href="/architecture/smp-system">
+    2-4 core symmetric multiprocessing with in-order 5-stage pipelines
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="MSI Cache Coherence" icon="arrows-rotate" href="/architecture/cache-coherence">
+    Private L1I/L1D caches with MSI protocol coordination via bus snooping
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Real-time Visualization" icon="chart-line" href="/configuration/metrics">
+    Live metrics for IPC, speedup, MPKI, branch accuracy, and coherence traffic
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Multiple Workloads" icon="tasks" href="/configuration/workloads">
+    Vector operations, matrix multiplication, histogram, and control flow patterns
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Getting Started
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get the simulator running in your browser in seconds
+  </Card>
+  <Card title="Running the Simulator" icon="play" href="/running-simulator">
+    Learn how to configure and control simulation execution
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the SMP system design and components
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/processor">
+    Explore the JavaScript modules and classes
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## What You'll Learn
 
-## Need inspiration?
+This simulator helps you understand:
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+- **Parallel Execution**: How multiple cores execute workloads simultaneously and achieve speedup
+- **Cache Coherence**: MSI protocol states (Modified, Shared, Invalid) and bus snooping behavior
+- **Pipeline Hazards**: Instruction latency, memory access delays, and branch misprediction penalties
+- **Branch Prediction**: gshare predictor with global history register and 2-bit saturating counters
+- **Performance Metrics**: IPC (instructions per cycle), speedup, MPKI (misses per thousand instructions), and coherence overhead

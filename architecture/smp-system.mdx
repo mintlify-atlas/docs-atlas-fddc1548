@@ -1,0 +1,314 @@
+---
+title: SMP System
+description: Symmetric multiprocessing architecture with 2-4 in-order cores
+---
+
+The SMP (Symmetric MultiProcessing) system orchestrates 2-4 cores executing a partitioned workload in parallel. The `Processor` class manages core construction, workload distribution, baseline calculation, and metrics aggregation.
+
+## Processor Class Structure
+
+The Processor is the top-level component that coordinates the entire simulation:
+
+```javascript
+// From processor.js:88-118
+export class Processor {
+  constructor(cfg) {
+    this.cfg = {
+      cores: 2,
+      workload: "vetor",
+      l1iHit: 1,
+      l1dHit: 2,
+      missPenalty: 15,
+      assoc: 2,
+      gshareBits: 6,
+      onLog: () => {},
+      ...cfg,
+    };
+    this.cycle = 0;
+    this.bus = new CoherenceBus(this.cfg.onLog);
+    this.cores = [];
+    this.metrics = {
+      committed: 0,
+      instructions: 0,
+      misses: 0,
+      coherenceMsgs: 0,
+      speedup: 1,
+      branch: { hits: 0, total: 0 },
+    };
+    this.workloads = buildWorkloads(this.cfg.workload, this.cfg.cores);
+    this.metrics.instructions = this.workloads.reduce((acc, w) => acc + w.length, 0);
+    this.buildCores();
+    const flat = this.workloads.flat();
+    this.baselineCycles = simulateBaseline(flat, this.cfg);
+    this.done = false;
+  }
+}
+```
+
+### Key Components
+
+- **CoherenceBus**: Shared bus for MSI protocol coordination
+- **cores**: Array of core objects, each containing:
+  - `pipe`: Pipeline instance
+  - `l1i`: Private L1 instruction cache
+  - `l1d`: Private L1 data cache (registered with bus)
+- **metrics**: Aggregated performance counters
+- **baselineCycles**: Single-core execution time for speedup calculation
+
+## Core Construction
+
+Each core is built with private caches and a dedicated pipeline:
+
+```javascript
+// From processor.js:120-128
+buildCores() {
+  this.cores = this.workloads.map((wl, idx) => {
+    const l1i = new Cache({ name: `L1I-${idx}`, sets: 32, ways: this.cfg.assoc, 
+                            hitLatency: this.cfg.l1iHit, missPenalty: this.cfg.missPenalty, 
+                            isInstruction: true });
+    const l1d = new Cache({ name: `L1D-${idx}`, sets: 32, ways: this.cfg.assoc, 
+                            hitLatency: this.cfg.l1dHit, missPenalty: this.cfg.missPenalty });
+    this.bus.register(l1d);
+    const pipe = new Pipeline(idx, l1i, l1d, wl, this.cfg.gshareBits);
+    return { id: idx, l1i, l1d, pipe };
+  });
+}
+```
+
+<Note>
+Only **L1D caches** are registered with the coherence bus. Instruction caches (L1I) do not participate in coherence since instructions are read-only.
+</Note>
+
+## Workload Partitioning
+
+Workloads are divided equally across cores. Four workload types are supported:
+
+### 1. Vector (`vetor`)
+
+Vector sum with stride-1 memory access:
+
+```javascript
+// From processor.js:8-17
+const emitVec = (core, base) => {
+  for (let i = 0; i < totalIters / cores; i++) {
+    const addr = base + i * 16;
+    core.push({ op: "load", addr: addr });
+    core.push({ op: "load", addr: addr + 4 });
+    core.push({ op: "alu", addr: addr });
+    core.push({ op: "store", addr: addr + 8 });
+    core.push({ op: "branch", addr: addr + 12, takenProb: 0.12 });
+  }
+};
+```
+
+**Characteristics:**
+- Linear memory access pattern
+- Low branch taken probability (12%)
+- Moderate ALU/memory mix
+
+### 2. Matrix Multiply (`matmul`)
+
+Tiled matrix multiplication with ALU-intensive blocks:
+
+```javascript
+// From processor.js:19-30
+const emitMatmul = (core, base) => {
+  const tiles = 16;
+  for (let t = 0; t < tiles; t++) {
+    const addr = base + t * 64;
+    core.push({ op: "load", addr });
+    core.push({ op: "load", addr: addr + 4 });
+    core.push({ op: "alu", addr });
+    core.push({ op: "alu", addr });
+    core.push({ op: "store", addr: addr + 8 });
+    core.push({ op: "branch", addr: addr + 12, takenProb: 0.18 });
+  }
+};
+```
+
+**Characteristics:**
+- Block-based access (64-byte stride)
+- Higher ALU intensity (2 ALU ops per iteration)
+- Low branch taken probability (18%)
+
+### 3. Histogram (`histograma`)
+
+Histogram with concurrent writes to shared buckets:
+
+```javascript
+// From processor.js:32-40
+const emitHist = (core, base) => {
+  for (let i = 0; i < totalIters / cores; i++) {
+    const addr = base + (i % 32) * 8;
+    core.push({ op: "load", addr });
+    core.push({ op: "alu", addr });
+    core.push({ op: "store", addr });
+    core.push({ op: "branch", addr: addr + 4, takenProb: 0.2 });
+  }
+};
+```
+
+**Characteristics:**
+- Modulo access pattern (32 buckets)
+- **High coherence traffic** (multiple cores writing to same buckets)
+- Read-modify-write pattern
+
+### 4. Control Flow (`controle`)
+
+Control-intensive with frequent branches:
+
+```javascript
+// From processor.js:42-50
+const emitControle = (core, base) => {
+  for (let i = 0; i < totalIters / cores; i++) {
+    const addr = base + i * 12;
+    core.push({ op: "branch", addr, takenProb: 0.55 });
+    core.push({ op: "load", addr });
+    core.push({ op: "branch", addr: addr + 4, takenProb: 0.35 });
+    core.push({ op: "alu", addr });
+  }
+};
+```
+
+**Characteristics:**
+- 2 branches per 4 instructions (50% branch density)
+- Higher branch taken probability (55% and 35%)
+- Tests branch predictor effectiveness
+
+<Warning>
+All cores use a **shared base address (0x0000)** to deliberately create overlapping memory accesses and trigger coherence protocol activity. This design choice maximizes coherence traffic for educational purposes.
+</Warning>
+
+## Baseline Calculation
+
+Before running the SMP simulation, a baseline is established by executing the entire workload (all threads concatenated) on a single core:
+
+```javascript
+// From processor.js:73-86
+function simulateBaseline(instructions, cfg) {
+  const bus = new CoherenceBus();
+  const l1i = new Cache({ name: "L1I", sets: 32, ways: cfg.assoc, 
+                          hitLatency: cfg.l1iHit, missPenalty: cfg.missPenalty, 
+                          bus, isInstruction: true });
+  const l1d = new Cache({ name: "L1D", sets: 32, ways: cfg.assoc, 
+                          hitLatency: cfg.l1dHit, missPenalty: cfg.missPenalty, bus });
+  bus.register(l1d);
+  const pipe = new Pipeline(0, l1i, l1d, instructions, cfg.gshareBits);
+  let cycles = 0;
+  const max = 80000;
+  while (!pipe.done && cycles < max) {
+    pipe.step(cycles);
+    cycles++;
+  }
+  return cycles || 1;
+}
+```
+
+### Baseline Properties
+
+- Uses **same cache configuration** (size, associativity, latencies)
+- Uses **same branch predictor** (gshare with same bit width)
+- Executes **all instructions sequentially** on one pipeline
+- Result stored in `this.baselineCycles`
+
+<Info>
+The baseline ensures fair speedup measurement. If a 4-core system takes 10,000 cycles and the baseline took 25,000 cycles, the speedup is **2.5×** (not 4×), accounting for serial portions, cache effects, and coherence overhead.
+</Info>
+
+## Speedup Metric
+
+Speedup is calculated dynamically during simulation:
+
+```javascript
+// From processor.js:145-147
+if (this.baselineCycles) {
+  this.metrics.speedup = this.baselineCycles / Math.max(1, this.cycle);
+}
+```
+
+**Formula:**
+```
+Speedup = Baseline Cycles / Current SMP Cycles
+```
+
+### Speedup Behavior
+
+- **Speedup < N cores**: Indicates overhead from coherence, contention, or load imbalance
+- **Speedup ≈ N cores**: Near-ideal scaling (rare with shared data)
+- **Speedup > N cores**: Impossible in this model (no super-linear scaling)
+
+## Cycle Execution
+
+Each simulation cycle advances all cores in parallel:
+
+```javascript
+// From processor.js:130-151
+step() {
+  if (this.done) return;
+  this.cycle++;
+  let committed = 0;
+  for (const core of this.cores) {
+    committed += core.pipe.step(this.cycle);
+  }
+  this.metrics.committed += committed;
+  // aggregate stats
+  const missSum = this.cores.reduce((acc, c) => acc + c.l1d.stats.misses, 0);
+  const branchHits = this.cores.reduce((acc, c) => acc + c.pipe.predictor.stats.hits, 0);
+  const branchTotal = this.cores.reduce((acc, c) => acc + c.pipe.predictor.stats.total, 0);
+  this.metrics.misses = missSum;
+  this.metrics.branch = { hits: branchHits, total: branchTotal };
+  this.metrics.coherenceMsgs = this.bus.stats.traffic + this.bus.stats.invalidations + this.bus.stats.upgrades;
+  if (this.baselineCycles) {
+    this.metrics.speedup = this.baselineCycles / Math.max(1, this.cycle);
+  }
+
+  const allDone = this.cores.every(c => c.pipe.done);
+  if (allDone) this.done = true;
+}
+```
+
+### Aggregated Metrics
+
+| Metric | Source | Description |
+|--------|--------|-------------|
+| `committed` | Sum of all pipelines | Total instructions retired |
+| `misses` | Sum of L1D misses | Total data cache misses |
+| `branch.hits` | Sum of predictor hits | Correct branch predictions |
+| `branch.total` | Sum of predictor attempts | Total branch predictions |
+| `coherenceMsgs` | Bus traffic + invalidations + upgrades | Coherence protocol overhead |
+| `speedup` | baseline / current cycles | Parallel efficiency |
+
+## Core Snapshots
+
+For visualization, the Processor provides per-core snapshots:
+
+```javascript
+// From processor.js:153-166
+coreSnapshots() {
+  return this.cores.map(core => {
+    const snap = core.pipe.snapshot();
+    const hits = core.l1d.stats.hits;
+    const misses = core.l1d.stats.misses;
+    return {
+      id: core.id,
+      pipeline: snap.pipeline,
+      pipelineStages: snap.pipelineStages,
+      current: snap.current,
+      cache: `H:${hits} / M:${misses}`,
+    };
+  });
+}
+```
+
+This data drives the UI's real-time pipeline and cache status display.
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Pipeline" icon="arrow-progress" href="/architecture/pipeline">
+    Learn how each core executes instructions
+  </Card>
+  <Card title="Cache Coherence" icon="arrows-rotate" href="/architecture/cache-coherence">
+    Understand MSI protocol and bus snooping
+  </Card>
+</CardGroup>

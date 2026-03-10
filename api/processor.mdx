@@ -1,0 +1,197 @@
+---
+title: Processor
+description: Main simulation controller that orchestrates multiple cores and tracks performance metrics
+---
+
+## Overview
+
+The `Processor` class is the top-level simulation controller that manages multiple cores, each with their own pipeline and caches. It coordinates execution across cores, aggregates performance metrics, and calculates speedup compared to a baseline single-core configuration.
+
+## Constructor
+
+```javascript
+new Processor(cfg)
+```
+
+<ParamField path="cfg" type="object">
+  Configuration object for the processor
+</ParamField>
+
+<ParamField path="cfg.cores" type="number" default="2">
+  Number of cores to simulate
+</ParamField>
+
+<ParamField path="cfg.workload" type="string" default="vetor">
+  Workload type: `"vetor"`, `"matmul"`, `"histograma"`, or `"controle"`
+</ParamField>
+
+<ParamField path="cfg.l1iHit" type="number" default="1">
+  L1 instruction cache hit latency in cycles
+</ParamField>
+
+<ParamField path="cfg.l1dHit" type="number" default="2">
+  L1 data cache hit latency in cycles
+</ParamField>
+
+<ParamField path="cfg.missPenalty" type="number" default="15">
+  Cache miss penalty in cycles
+</ParamField>
+
+<ParamField path="cfg.assoc" type="number" default="2">
+  Cache associativity (number of ways)
+</ParamField>
+
+<ParamField path="cfg.gshareBits" type="number" default="6">
+  Number of bits for the gshare branch predictor
+</ParamField>
+
+<ParamField path="cfg.onLog" type="function" default="() => {}">
+  Callback function for logging coherence events
+</ParamField>
+
+## Properties
+
+### cycle
+
+```javascript
+processor.cycle
+```
+
+Current simulation cycle count. Increments with each call to `step()`.
+
+### done
+
+```javascript
+processor.done
+```
+
+Boolean indicating whether all cores have completed their workloads.
+
+### cores
+
+```javascript
+processor.cores
+```
+
+Array of core objects, each containing:
+- `id` - Core identifier (number)
+- `l1i` - L1 instruction cache instance
+- `l1d` - L1 data cache instance
+- `pipe` - Pipeline instance
+
+### bus
+
+```javascript
+processor.bus
+```
+
+The `CoherenceBus` instance shared across all data caches for MSI protocol coordination.
+
+### metrics
+
+```javascript
+processor.metrics
+```
+
+Object containing aggregated performance metrics:
+
+```javascript
+{
+  committed: 0,        // Total instructions committed across all cores
+  instructions: 0,     // Total instructions in all workloads
+  misses: 0,          // Total L1D cache misses
+  coherenceMsgs: 0,   // Total coherence messages (traffic + invalidations + upgrades)
+  speedup: 1,         // Speedup vs baseline single-core
+  branch: {
+    hits: 0,          // Correct branch predictions
+    total: 0          // Total branch predictions
+  }
+}
+```
+
+## Methods
+
+### step()
+
+Advances the simulation by one cycle for all cores.
+
+```javascript
+processor.step()
+```
+
+**Behavior:**
+- Increments the cycle counter
+- Calls `step()` on each core's pipeline
+- Aggregates metrics from all cores
+- Calculates speedup based on baseline cycles
+- Sets `done` to `true` when all cores finish
+
+### coreSnapshots()
+
+Returns the current state of all cores for visualization.
+
+```javascript
+const snapshots = processor.coreSnapshots()
+```
+
+**Returns:** Array of objects, one per core:
+
+```javascript
+[
+  {
+    id: 0,                           // Core ID
+    pipeline: "IF:load | ID:- ...",  // Pipeline stage visualization
+    pipelineStages: [...],           // Array of stage objects
+    current: "load",                 // Current operation in execution
+    cache: "H:150 / M:12"            // Cache hits/misses string
+  }
+]
+```
+
+## Example
+
+```javascript
+import { Processor } from './modules/processor.js';
+
+// Create a 4-core processor running matrix multiplication
+const processor = new Processor({
+  cores: 4,
+  workload: 'matmul',
+  l1dHit: 2,
+  missPenalty: 20,
+  assoc: 4,
+  onLog: (msg) => console.log(`[Coherence] ${msg}`)
+});
+
+// Run simulation
+while (!processor.done) {
+  processor.step();
+  
+  // Log progress every 1000 cycles
+  if (processor.cycle % 1000 === 0) {
+    console.log(`Cycle ${processor.cycle}`);
+    console.log(`IPC: ${(processor.metrics.committed / processor.cycle).toFixed(2)}`);
+    console.log(`Speedup: ${processor.metrics.speedup.toFixed(2)}x`);
+  }
+}
+
+// Final metrics
+console.log(`\nSimulation complete in ${processor.cycle} cycles`);
+console.log(`Total instructions: ${processor.metrics.instructions}`);
+console.log(`Instructions committed: ${processor.metrics.committed}`);
+console.log(`Cache misses: ${processor.metrics.misses}`);
+console.log(`Coherence messages: ${processor.metrics.coherenceMsgs}`);
+console.log(`Branch prediction accuracy: ${(processor.metrics.branch.hits / processor.metrics.branch.total * 100).toFixed(1)}%`);
+console.log(`Speedup vs baseline: ${processor.metrics.speedup.toFixed(2)}x`);
+```
+
+## Workload Types
+
+The processor supports four built-in workload patterns:
+
+- **`vetor`** - Vector operations with loads, stores, and ALU operations
+- **`matmul`** - Matrix multiplication with tiled access patterns
+- **`histograma`** - Histogram computation with high sharing and contention
+- **`controle`** - Control-intensive code with many branches
+
+Each workload is automatically distributed across cores with shared memory addresses to generate coherence traffic.

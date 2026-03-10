@@ -1,0 +1,413 @@
+---
+title: Cache Coherence
+description: MSI protocol implementation with bus snooping for L1D caches
+---
+
+The SMP simulator implements the MSI (Modified-Shared-Invalid) cache coherence protocol via a shared `CoherenceBus`. All L1D caches snoop bus transactions to maintain coherence, ensuring that multiple cores see a consistent view of memory.
+
+## MSI Protocol States
+
+Each cache line can be in one of three coherence states:
+
+| State | Abbreviation | Description |
+|-------|--------------|-------------|
+| **Modified** | M | Line is dirty, exclusively held, and must be written back |
+| **Shared** | S | Line is clean and may be present in other caches |
+| **Invalid** | I | Line is not valid (empty or evicted) |
+
+<Note>
+The simulator uses a **simplified MSI model** without explicit memory backing. The focus is on state transitions and bus traffic, not data values.
+</Note>
+
+## Cache Line Structure
+
+```javascript
+// From cache.js:2-8
+export class CacheLine {
+  constructor() {
+    this.tag = null;
+    this.state = "I"; // M, S, I
+    this.lastUsed = 0;
+  }
+}
+```
+
+- **tag**: Upper address bits for matching
+- **state**: Current MSI state ("M", "S", or "I")
+- **lastUsed**: Cycle timestamp for LRU replacement
+
+## Cache Implementation
+
+The `Cache` class models a set-associative cache with configurable parameters:
+
+```javascript
+// From cache.js:10-23
+export class Cache {
+  constructor({ name, sets = 32, ways = 2, hitLatency = 1, missPenalty = 10, bus = null, isInstruction = false }) {
+    this.name = name;
+    this.sets = sets;
+    this.ways = ways;
+    this.hitLatency = hitLatency;
+    this.missPenalty = missPenalty;
+    this.isInstruction = isInstruction;
+    this.bus = bus;
+    this.offsetBits = 5; // bloco de 32 bytes
+    this.indexBits = Math.log2(this.sets) | 0;
+    this.data = Array.from({ length: sets }, () => []);
+    this.stats = { hits: 0, misses: 0 };
+  }
+}
+```
+
+### Cache Parameters
+
+- **sets**: Number of cache sets (default 32)
+- **ways**: Associativity (default 2-way)
+- **hitLatency**: Cycles for cache hit (L1I=1, L1D=2)
+- **missPenalty**: Additional cycles for miss (default 15)
+- **offsetBits**: Block size = 2^5 = 32 bytes
+- **isInstruction**: If true, cache does not participate in coherence
+
+### Address Decomposition
+
+```javascript
+// From cache.js:29-35
+getIndex(address) {
+  return (address >> this.offsetBits) & ((1 << this.indexBits) - 1);
+}
+
+getTag(address) {
+  return address >> (this.offsetBits + this.indexBits);
+}
+```
+
+With 32 sets (5 index bits) and 32-byte blocks (5 offset bits):
+
+```
+Address: | Tag (22 bits) | Index (5 bits) | Offset (5 bits) |
+```
+
+## Cache Access
+
+The `access()` method handles reads and writes with coherence:
+
+```javascript
+// From cache.js:70-93
+access(address, { isWrite = false, cycle = 0 } = {}) {
+  let latency = this.hitLatency;
+  let hit = false;
+  let line = this.lookup(address);
+
+  if (line && line.state !== "I") {
+    hit = true;
+    line.lastUsed = cycle;
+    if (isWrite && line.state === "S") {
+      // upgrade
+      this.bus?.upgrade(this, address);
+      line.state = "M";
+    }
+  } else {
+    this.stats.misses++;
+    const snoop = this.bus?.snoop(this, address, isWrite, this.isInstruction) || { shared: false };
+    latency += this.missPenalty;
+    line = this.allocate(address, cycle);
+    line.state = isWrite ? "M" : (snoop.shared ? "S" : "S");
+  }
+
+  if (hit) this.stats.hits++;
+  return { latency, hit };
+}
+```
+
+### Access Flow
+
+#### Case 1: Hit on Valid Line (S or M)
+
+1. Line found with state ≠ I
+2. Update `lastUsed` for LRU
+3. If **write to S**: Trigger upgrade (S → M)
+4. Return hit latency
+
+#### Case 2: Miss (Line Not Found or Invalid)
+
+1. Increment miss counter
+2. Snoop bus to check if other caches have the line
+3. Add miss penalty to latency
+4. Allocate new line (possibly evicting LRU victim)
+5. Set state:
+   - **Write**: M (exclusive ownership)
+   - **Read**: S (may be shared)
+
+<Warning>
+The simplified model always allocates in **S state** for reads, even if no other cache has the line. A full MSI implementation would use **E (Exclusive)** state for sole ownership.
+</Warning>
+
+## MSI State Transitions
+
+### Read Hit (S or M)
+
+```
+S → S  (read hit on shared line)
+M → M  (read hit on modified line)
+```
+
+No bus transaction needed.
+
+### Write Hit on S (Upgrade)
+
+```javascript
+// From cache.js:78-82
+if (isWrite && line.state === "S") {
+  // upgrade
+  this.bus?.upgrade(this, address);
+  line.state = "M";
+}
+```
+
+```
+S → M  (write hit requires exclusive ownership)
+```
+
+Bus sends **upgrade request**, invalidating all other copies.
+
+### Write Hit on M
+
+```
+M → M  (write hit on modified line)
+```
+
+No bus transaction (already exclusive).
+
+### Read Miss
+
+```
+I → S  (allocate in shared state)
+```
+
+Bus snoops other caches. If found in M, remote cache downgrades to S.
+
+### Write Miss
+
+```
+I → M  (allocate in modified state)
+```
+
+Bus invalidates all other copies.
+
+## CoherenceBus Implementation
+
+The `CoherenceBus` coordinates snooping and state transitions:
+
+```javascript
+// From cache.js:100-110
+export class CoherenceBus {
+  constructor(onLog = () => {}) {
+    this.caches = [];
+    this.onLog = onLog;
+    this.stats = { traffic: 0, invalidations: 0, upgrades: 0 };
+  }
+
+  register(cache) {
+    this.caches.push(cache);
+    cache.connectBus(this);
+  }
+}
+```
+
+### Snoop Operation
+
+Called on every cache miss to check other caches:
+
+```javascript
+// From cache.js:112-133
+snoop(requester, address, isWrite, isInstruction = false) {
+  // Instrução não participa de coerência
+  if (isInstruction) return { shared: false };
+  let shared = false;
+  for (const cache of this.caches) {
+    if (cache === requester) continue;
+    const line = cache.findLine(address);
+    if (!line || line.state === "I") continue;
+    shared = true;
+    if (isWrite) {
+      line.state = "I";
+      this.stats.invalidations++;
+      this.onLog(`Inv ${cache.name} para 0x${address.toString(16)}`);
+    } else if (line.state === "M") {
+      // downgrade M->S para atender leitura
+      line.state = "S";
+      this.onLog(`Downgrade M->S em ${cache.name} para 0x${address.toString(16)}`);
+    }
+    this.stats.traffic++;
+  }
+  return { shared };
+}
+```
+
+#### Snoop Logic
+
+**For read miss (`isWrite = false`):**
+- If line found in **M**: Downgrade to S (implicit writeback)
+- If line found in **S**: No action
+- Return `{ shared: true }` if any cache has the line
+
+**For write miss (`isWrite = true`):**
+- If line found in **M** or **S**: Invalidate (→ I)
+- Increment `invalidations` counter
+- Log invalidation event
+
+<Info>
+**Instruction caches (L1I)** do not participate in snooping. The `isInstruction` flag causes `snoop()` to return early, avoiding coherence overhead for read-only code.
+</Info>
+
+### Upgrade Operation
+
+Called when a cache writes to a shared line:
+
+```javascript
+// From cache.js:135-147
+upgrade(requester, address) {
+  for (const cache of this.caches) {
+    if (cache === requester) continue;
+    const line = cache.findLine(address);
+    if (line && line.state !== "I") {
+      line.state = "I";
+      this.stats.invalidations++;
+      this.stats.upgrades++;
+      this.stats.traffic++;
+      this.onLog(`Upgrade: ${requester.name} invalida ${cache.name} em 0x${address.toString(16)}`);
+    }
+  }
+}
+```
+
+#### Upgrade Logic
+
+1. Iterate over all caches except requester
+2. If line found (S or M): Invalidate (→ I)
+3. Increment `invalidations`, `upgrades`, and `traffic` counters
+4. Log upgrade event
+
+<Note>
+An **upgrade** is a special case of invalidation where the requester already has the line in S and needs exclusive (M) access. It's counted separately for analysis.
+</Note>
+
+## Cache Replacement Policy
+
+The cache uses **LRU (Least Recently Used)** replacement:
+
+```javascript
+// From cache.js:47-68
+allocate(address, cycle) {
+  const setIdx = this.getIndex(address);
+  const tag = this.getTag(address);
+  const set = this.data[setIdx];
+  if (set.length < this.ways) {
+    const line = new CacheLine();
+    line.tag = tag;
+    line.state = "S";
+    line.lastUsed = cycle;
+    set.push(line);
+    return line;
+  }
+  // política: LRU simples
+  let victim = set[0];
+  for (const line of set) {
+    if (line.lastUsed < victim.lastUsed) victim = line;
+  }
+  victim.tag = tag;
+  victim.state = "S";
+  victim.lastUsed = cycle;
+  return victim;
+}
+```
+
+### Allocation Steps
+
+1. If set not full: Add new line
+2. If set full: Find line with smallest `lastUsed` timestamp
+3. Replace victim's tag and reset state to S
+4. Update `lastUsed` to current cycle
+
+<Warning>
+The simulator does **not model writebacks** explicitly. When a line in M state is evicted, no bus transaction occurs. This simplification focuses on coherence messages rather than memory bandwidth.
+</Warning>
+
+## Coherence Metrics
+
+The bus tracks three coherence-related metrics:
+
+```javascript
+this.stats = { 
+  traffic: 0,       // Total snoop/upgrade messages
+  invalidations: 0, // Cache lines invalidated
+  upgrades: 0       // S→M upgrades
+};
+```
+
+### Metric Interpretation
+
+- **traffic**: Total coherence messages (snoops + upgrades)
+- **invalidations**: Cache line conflicts (sharing violated)
+- **upgrades**: Write upgrades from S to M
+
+**High coherence traffic** indicates:
+- Significant data sharing between cores
+- Frequent read-write conflicts
+- Potential performance bottleneck (false sharing)
+
+## Example Coherence Scenario
+
+### Scenario: Two Cores Accessing Shared Data
+
+**Initial state:**
+- Core 0: Address 0x100 not in cache
+- Core 1: Address 0x100 not in cache
+
+**Cycle 10: Core 0 reads 0x100**
+1. L1D-0 miss, snoop bus
+2. No other cache has 0x100
+3. Allocate in S state
+4. `bus.stats.traffic += 1`
+
+**State:** L1D-0: 0x100 (S), L1D-1: -
+
+**Cycle 20: Core 1 reads 0x100**
+1. L1D-1 miss, snoop bus
+2. L1D-0 has 0x100 in S (no action)
+3. Allocate in S state
+4. `bus.stats.traffic += 1`
+
+**State:** L1D-0: 0x100 (S), L1D-1: 0x100 (S)
+
+**Cycle 30: Core 0 writes 0x100**
+1. L1D-0 hit, but state is S
+2. Send upgrade request
+3. L1D-1: 0x100 S → I
+4. L1D-0: 0x100 S → M
+5. `bus.stats.traffic += 1, invalidations += 1, upgrades += 1`
+
+**State:** L1D-0: 0x100 (M), L1D-1: 0x100 (I)
+
+**Cycle 40: Core 1 writes 0x100**
+1. L1D-1 miss (line is I), snoop bus
+2. L1D-0 has 0x100 in M → invalidate (I)
+3. Allocate in M state
+4. `bus.stats.traffic += 1, invalidations += 1`
+
+**State:** L1D-0: 0x100 (I), L1D-1: 0x100 (M)
+
+<Info>
+This scenario generated **4 coherence messages** and **2 invalidations**. Real workloads with high sharing (like `histograma`) generate far more traffic.
+</Info>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="SMP System" icon="microchip" href="/architecture/smp-system">
+    Learn how cores and caches are orchestrated
+  </Card>
+  <Card title="Pipeline" icon="arrow-progress" href="/architecture/pipeline">
+    Understand how MEM stage interacts with L1D
+  </Card>
+</CardGroup>

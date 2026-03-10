@@ -1,0 +1,309 @@
+---
+title: Cache
+description: Set-associative cache with MSI coherence protocol support
+---
+
+## Overview
+
+The `Cache` class implements a set-associative cache with:
+- Configurable set count and associativity
+- LRU replacement policy
+- MSI coherence protocol integration
+- Separate instruction and data cache modes
+- Configurable hit latency and miss penalty
+
+## Constructor
+
+```javascript
+new Cache({ name, sets, ways, hitLatency, missPenalty, bus, isInstruction })
+```
+
+<ParamField path="name" type="string" required>
+  Cache identifier for debugging and logging
+</ParamField>
+
+<ParamField path="sets" type="number" default="32">
+  Number of cache sets
+</ParamField>
+
+<ParamField path="ways" type="number" default="2">
+  Associativity (number of ways per set)
+</ParamField>
+
+<ParamField path="hitLatency" type="number" default="1">
+  Cache hit latency in cycles
+</ParamField>
+
+<ParamField path="missPenalty" type="number" default="10">
+  Additional cycles for cache miss
+</ParamField>
+
+<ParamField path="bus" type="CoherenceBus" default="null">
+  Coherence bus for multi-cache coordination. Optional for instruction caches.
+</ParamField>
+
+<ParamField path="isInstruction" type="boolean" default="false">
+  If `true`, cache does not participate in coherence protocol
+</ParamField>
+
+## Properties
+
+### stats
+
+```javascript
+cache.stats
+```
+
+Object tracking cache performance:
+
+```javascript
+{
+  hits: 0,    // Number of cache hits
+  misses: 0   // Number of cache misses
+}
+```
+
+### Configuration Properties
+
+```javascript
+cache.name            // Cache identifier
+cache.sets            // Number of sets
+cache.ways            // Associativity
+cache.hitLatency      // Hit latency in cycles
+cache.missPenalty     // Miss penalty in cycles
+cache.isInstruction   // Instruction cache flag
+cache.bus             // CoherenceBus instance
+```
+
+### Cache Organization
+
+```javascript
+cache.offsetBits      // 5 (32-byte cache blocks)
+cache.indexBits       // log2(sets)
+cache.data            // Array of sets, each containing cache lines
+```
+
+## Methods
+
+### access(address, options)
+
+Performs a cache access with coherence support.
+
+```javascript
+const { latency, hit } = cache.access(address, { isWrite, cycle })
+```
+
+<ParamField path="address" type="number" required>
+  Memory address to access
+</ParamField>
+
+<ParamField path="options.isWrite" type="boolean" default="false">
+  Whether this is a write operation
+</ParamField>
+
+<ParamField path="options.cycle" type="number" default="0">
+  Current simulation cycle for LRU tracking
+</ParamField>
+
+**Returns:**
+
+```javascript
+{
+  latency: number,  // Total access latency (hitLatency or hitLatency + missPenalty)
+  hit: boolean      // Whether access was a hit
+}
+```
+
+**Behavior:**
+
+**On cache hit:**
+1. Updates `lastUsed` timestamp
+2. If write to Shared line: calls `bus.upgrade()` and transitions to Modified
+3. Returns `hitLatency`
+
+**On cache miss:**
+1. Increments `stats.misses`
+2. Calls `bus.snoop()` to check other caches (unless instruction cache)
+3. Allocates new cache line (evicting LRU if full)
+4. Sets state to Modified (if write) or Shared
+5. Returns `hitLatency + missPenalty`
+
+### lookup(address)
+
+Searches for a cache line without modifying state.
+
+```javascript
+const line = cache.lookup(address)
+```
+
+**Returns:** `CacheLine` object if found, `null` otherwise.
+
+### allocate(address, cycle)
+
+Allocates a new cache line or replaces the LRU victim.
+
+```javascript
+const line = cache.allocate(address, cycle)
+```
+
+<ParamField path="address" type="number" required>
+  Memory address to allocate
+</ParamField>
+
+<ParamField path="cycle" type="number" required>
+  Current cycle for LRU timestamp
+</ParamField>
+
+**Returns:** Newly allocated or evicted `CacheLine` in Shared state.
+
+**Behavior:**
+- If set not full: creates new `CacheLine`
+- If set full: evicts LRU line (minimum `lastUsed`)
+- Sets `tag`, `state = "S"`, and `lastUsed = cycle`
+
+### connectBus(bus)
+
+Connects the cache to a coherence bus.
+
+```javascript
+cache.connectBus(bus)
+```
+
+### findLine(address)
+
+Alias for `lookup()`. Used by coherence bus for snooping.
+
+```javascript
+const line = cache.findLine(address)
+```
+
+## CacheLine
+
+Represents a single cache line with MSI state.
+
+### Constructor
+
+```javascript
+new CacheLine()
+```
+
+Creates an invalid cache line:
+
+```javascript
+{
+  tag: null,        // Address tag
+  state: "I",       // MSI state: "M" (Modified), "S" (Shared), or "I" (Invalid)
+  lastUsed: 0       // Cycle of last access (for LRU)
+}
+```
+
+### MSI States
+
+- **`"M"` (Modified):** Exclusive ownership, dirty data. Other caches must be Invalid.
+- **`"S"` (Shared):** Read-only copy. Multiple caches can have Shared copies.
+- **`"I"` (Invalid):** Line does not contain valid data.
+
+## Address Mapping
+
+The cache uses the following address breakdown:
+
+```
+┌─────────────┬──────────────┬──────────────┐
+│     Tag     │    Index     │    Offset    │
+└─────────────┴──────────────┴──────────────┘
+     varies      log2(sets)       5 bits
+```
+
+- **Offset:** 5 bits (32-byte blocks)
+- **Index:** `log2(sets)` bits
+- **Tag:** Remaining high-order bits
+
+```javascript
+const index = cache.getIndex(address)  // (address >> 5) & ((1 << indexBits) - 1)
+const tag = cache.getTag(address)      // address >> (5 + indexBits)
+```
+
+## Example
+
+```javascript
+import { Cache, CoherenceBus } from './modules/cache.js';
+
+// Create coherence bus
+const bus = new CoherenceBus((msg) => console.log(`[Bus] ${msg}`));
+
+// Create two data caches sharing the bus
+const cacheA = new Cache({
+  name: 'L1D-0',
+  sets: 64,
+  ways: 4,
+  hitLatency: 1,
+  missPenalty: 20
+});
+bus.register(cacheA);
+
+const cacheB = new Cache({
+  name: 'L1D-1',
+  sets: 64,
+  ways: 4,
+  hitLatency: 1,
+  missPenalty: 20
+});
+bus.register(cacheB);
+
+// Simulate accesses
+let cycle = 0;
+
+// Core 0 reads address 0x1000
+const r1 = cacheA.access(0x1000, { isWrite: false, cycle: cycle++ });
+console.log(`Core 0 read: ${r1.hit ? 'HIT' : 'MISS'}, latency=${r1.latency}`);
+// Output: Core 0 read: MISS, latency=21
+
+// Core 1 reads same address (will be shared)
+const r2 = cacheB.access(0x1000, { isWrite: false, cycle: cycle++ });
+console.log(`Core 1 read: ${r2.hit ? 'HIT' : 'MISS'}, latency=${r2.latency}`);
+// Output: [Bus] Downgrade M->S in L1D-0 for 0x1000
+// Output: Core 1 read: MISS, latency=21
+
+// Core 0 writes to address (upgrade from S to M)
+const w1 = cacheA.access(0x1000, { isWrite: true, cycle: cycle++ });
+console.log(`Core 0 write: ${w1.hit ? 'HIT' : 'MISS'}, latency=${w1.latency}`);
+// Output: [Bus] Upgrade: L1D-0 invalida L1D-1 em 0x1000
+// Output: Core 0 write: HIT, latency=1
+
+// Core 1 reads again (invalidated, must fetch)
+const r3 = cacheB.access(0x1000, { isWrite: false, cycle: cycle++ });
+console.log(`Core 1 read: ${r3.hit ? 'HIT' : 'MISS'}, latency=${r3.latency}`);
+// Output: [Bus] Downgrade M->S in L1D-0 for 0x1000
+// Output: Core 1 read: MISS, latency=21
+
+// Print statistics
+console.log('\nCache A:', cacheA.stats);
+console.log('Cache B:', cacheB.stats);
+console.log('Bus:', bus.stats);
+```
+
+## LRU Replacement Policy
+
+When a set is full and a new line must be allocated:
+
+1. Find the line with minimum `lastUsed` timestamp
+2. Evict that line (no writeback simulated)
+3. Reuse the line for the new tag
+
+```javascript
+let victim = set[0];
+for (const line of set) {
+  if (line.lastUsed < victim.lastUsed) {
+    victim = line;
+  }
+}
+```
+
+## Instruction vs Data Caches
+
+Instruction caches (`isInstruction: true`) have special behavior:
+
+- Do not participate in coherence protocol
+- Do not call `bus.snoop()` on misses
+- Typically have lower hit latency (1 cycle)
+- No write operations

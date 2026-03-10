@@ -1,0 +1,344 @@
+---
+title: Pipeline
+description: 5-stage in-order pipeline with latency modeling and branch prediction
+---
+
+Each core in the SMP system contains a 5-stage in-order pipeline implementing a subset of the RISC-V RV32I instruction set. The `Pipeline` class models cycle-accurate execution with configurable cache latencies and branch misprediction penalties.
+
+## Pipeline Stages
+
+The pipeline consists of five classic stages:
+
+| Stage | Name | Function |
+|-------|------|----------|
+| **IF** | Instruction Fetch | Fetch instruction from L1I cache |
+| **ID** | Instruction Decode | Decode and read operands |
+| **EX** | Execute | Perform ALU operation or branch resolution |
+| **MEM** | Memory Access | Access L1D cache for loads/stores |
+| **WB** | Write Back | Commit instruction and update state |
+
+## Pipeline Class Implementation
+
+```javascript
+// From pipeline.js:28-39
+export class Pipeline {
+  constructor(coreId, l1i, l1d, instructions, gshareBits = 6) {
+    this.id = coreId;
+    this.l1i = l1i;
+    this.l1d = l1d;
+    this.instructions = instructions;
+    this.pc = 0;
+    this.flush = 0;
+    this.stages = { IF: null, ID: null, EX: null, MEM: null, WB: null };
+    this.predictor = new BranchPredictor(gshareBits);
+    this.retired = 0;
+  }
+}
+```
+
+### Key Fields
+
+- **pc**: Program counter (index into instruction array)
+- **flush**: Flush counter for branch misprediction penalty
+- **stages**: Object holding current instruction in each stage (or `null` if empty)
+- **predictor**: gshare branch predictor instance
+- **retired**: Count of committed (retired) instructions
+
+## Instruction Format
+
+Instructions are represented as objects with operation type and address:
+
+```javascript
+{
+  op: "load" | "store" | "alu" | "branch",
+  addr: <numeric address>,
+  takenProb: <0.0-1.0>  // Only for branches
+}
+```
+
+During execution, the pipeline adds runtime fields:
+- **remaining**: Cycles left in current stage
+- **stage**: Current stage name
+- **fetchSetup**: Flag for IF latency initialization
+- **memSetup**: Flag for MEM latency initialization
+
+## Execution Flow
+
+The pipeline executes one cycle via the `step()` method:
+
+```javascript
+// From pipeline.js:63-90
+step(cycle) {
+  let committed = 0;
+  if (this.stages.WB) {
+    committed++;
+    this.retired++;
+    this.stages.WB = null;
+  }
+
+  // Move pipeline WB -> IF
+  this.advance("MEM", "WB", cycle);
+  this.advance("EX", "MEM", cycle);
+  this.advance("ID", "EX", cycle);
+  this.advance("IF", "ID", cycle);
+
+  if (this.flush > 0) {
+    this.flush--;
+    return committed;
+  }
+
+  // Fetch new instruction
+  if (!this.stages.IF && this.pc < this.instructions.length) {
+    const instr = { ...this.instructions[this.pc], remaining: 1 };
+    this.stages.IF = instr;
+    this.pc++;
+  }
+
+  return committed;
+}
+```
+
+### Step Sequence
+
+1. **Retire (WB)**: If an instruction is in WB, commit it and increment counter
+2. **Advance stages**: Move instructions backward (WB ← MEM ← EX ← ID ← IF)
+3. **Check flush**: If flushing due to misprediction, decrement counter and skip fetch
+4. **Fetch**: If IF is empty and instructions remain, fetch next instruction
+
+<Note>
+Instructions advance **backward** through the pipeline (from WB to IF) to avoid clobbering. This is a common implementation pattern for pipeline simulators.
+</Note>
+
+## Stage Advancement
+
+The `advance()` method handles stage-specific latencies:
+
+```javascript
+// From pipeline.js:92-137
+advance(from, to, cycle) {
+  const instr = this.stages[from];
+  if (!instr) return;
+
+  // Initialize stage-specific latency
+  if (!instr.stage) instr.stage = from;
+
+  if (from === "IF" && instr.fetchSetup !== true) {
+    const { latency } = this.l1i.access(instr.addr, { isWrite: false, cycle });
+    instr.remaining = latency;
+    instr.fetchSetup = true;
+  }
+
+  if (from === "MEM" && instr.memSetup !== true) {
+    if (instr.op === "load" || instr.op === "store") {
+      const { latency } = this.l1d.access(instr.addr, { isWrite: instr.op === "store", cycle });
+      instr.remaining = latency;
+    }
+    instr.memSetup = true;
+  }
+
+  instr.remaining = Math.max(0, (instr.remaining || 1) - 1);
+  if (instr.remaining > 0) return;
+
+  if (from === "EX" && instr.op === "branch") {
+    const predicted = this.predictor.predict(instr.addr);
+    const taken = Math.random() < instr.takenProb;
+    this.predictor.update(instr.addr, taken);
+    this.predictor.stats.total++;
+    if ((taken && predicted) || (!taken && !predicted)) {
+      this.predictor.stats.hits++;
+    } else {
+      // Penalize with a 2-cycle flush
+      this.flush = 2;
+      this.stages.IF = null;
+      this.stages.ID = null;
+    }
+  }
+
+  // Move to the next stage
+  if (this.stages[to] === null) {
+    instr.remaining = 1;
+    this.stages[to] = instr;
+    this.stages[from] = null;
+  }
+}
+```
+
+### Latency Modeling
+
+#### IF Stage (Instruction Fetch)
+
+```javascript
+// From pipeline.js:99-103
+if (from === "IF" && instr.fetchSetup !== true) {
+  const { latency } = this.l1i.access(instr.addr, { isWrite: false, cycle });
+  instr.remaining = latency;
+  instr.fetchSetup = true;
+}
+```
+
+- Accesses L1I cache with instruction address
+- Latency = **hit latency** (default 1 cycle) on hit
+- Latency = **hit latency + miss penalty** (default 1 + 15 = 16 cycles) on miss
+- `fetchSetup` flag ensures latency is set only once per instruction
+
+#### MEM Stage (Memory Access)
+
+```javascript
+// From pipeline.js:105-111
+if (from === "MEM" && instr.memSetup !== true) {
+  if (instr.op === "load" || instr.op === "store") {
+    const { latency } = this.l1d.access(instr.addr, { isWrite: instr.op === "store", cycle });
+    instr.remaining = latency;
+  }
+  instr.memSetup = true;
+}
+```
+
+- Only applies to **load** and **store** operations
+- Accesses L1D cache with data address
+- Latency = **hit latency** (default 2 cycles) on hit
+- Latency = **hit latency + miss penalty** (default 2 + 15 = 17 cycles) on miss
+- Stores may trigger **coherence upgrades** (S → M transition)
+
+<Info>
+ALU operations and branches do **not** access memory in the MEM stage. They use a default 1-cycle latency to advance through the stage.
+</Info>
+
+### Branch Resolution and Flush
+
+Branches are resolved in the **EX stage**:
+
+```javascript
+// From pipeline.js:116-129
+if (from === "EX" && instr.op === "branch") {
+  const predicted = this.predictor.predict(instr.addr);
+  const taken = Math.random() < instr.takenProb;
+  this.predictor.update(instr.addr, taken);
+  this.predictor.stats.total++;
+  if ((taken && predicted) || (!taken && !predicted)) {
+    this.predictor.stats.hits++;
+  } else {
+    // Penalize with a 2-cycle flush
+    this.flush = 2;
+    this.stages.IF = null;
+    this.stages.ID = null;
+  }
+}
+```
+
+#### Branch Execution Steps
+
+1. **Predict**: Query gshare predictor with PC
+2. **Execute**: Determine actual outcome (random based on `takenProb`)
+3. **Update**: Update predictor state and statistics
+4. **Check**: Compare prediction to actual
+5. **Flush**: If mispredicted, set 2-cycle flush penalty and clear IF/ID stages
+
+<Warning>
+The **2-cycle flush penalty** models the cost of squashing incorrect speculative instructions. During flush cycles, no new instructions enter the pipeline, effectively creating bubbles.
+</Warning>
+
+## Pipeline Stalls
+
+The pipeline naturally stalls when an instruction has `remaining > 0` cycles:
+
+- **Cache miss stall**: Instruction waits in IF or MEM until latency expires
+- **Structural hazard**: Instruction cannot advance if next stage is occupied
+- **Branch flush**: Pipeline freezes during flush countdown
+
+### Example: L1D Miss Scenario
+
+```
+Cycle 100: load enters MEM stage
+           L1D miss detected → remaining = 17 cycles
+
+Cycle 101: load still in MEM (remaining = 16)
+           Pipeline stalled (MEM occupied)
+
+Cycle 102-116: load remains in MEM
+
+Cycle 117: load remaining = 0, advances to WB
+           Pipeline resumes
+```
+
+## Pipeline Snapshot
+
+For visualization, the pipeline provides a snapshot of its current state:
+
+```javascript
+// From pipeline.js:46-61
+snapshot() {
+  const order = ["IF", "ID", "EX", "MEM", "WB"];
+  const pipeStr = Object.entries(this.stages)
+    .map(([k, v]) => `${k}:${v ? v.op : "-"}`)
+    .join(" | ");
+  const stageList = order.map(stage => {
+    const instr = this.stages[stage];
+    return { stage, op: instr ? instr.op : "-", busy: Boolean(instr) };
+  });
+  const curr = this.stages.EX || this.stages.ID || this.stages.IF;
+  return {
+    pipeline: pipeStr,
+    pipelineStages: stageList,
+    current: curr ? `${curr.op}${curr.op === "branch" ? "?" : ""}` : "idle",
+  };
+}
+```
+
+**Example output:**
+```
+pipeline: "IF:load | ID:alu | EX:store | MEM:load | WB:branch"
+pipelineStages: [
+  { stage: "IF", op: "load", busy: true },
+  { stage: "ID", op: "alu", busy: true },
+  { stage: "EX", op: "store", busy: true },
+  { stage: "MEM", op: "load", busy: true },
+  { stage: "WB", op: "branch", busy: true }
+]
+current: "store"
+```
+
+## Pipeline Completion
+
+The pipeline is considered **done** when:
+1. All instructions have been fetched (`pc >= instructions.length`)
+2. All stages are empty (no in-flight instructions)
+
+```javascript
+// From pipeline.js:41-44
+get done() {
+  const empty = Object.values(this.stages).every(s => s === null);
+  return this.pc >= this.instructions.length && empty;
+}
+```
+
+## Performance Implications
+
+### Instruction Throughput
+
+- **Ideal CPI**: 1.0 (one instruction per cycle in steady state)
+- **Actual CPI**: Higher due to:
+  - Cache misses (16-17 cycle stalls)
+  - Branch mispredictions (2-cycle flushes)
+  - Pipeline fill/drain overhead
+
+### Critical Paths
+
+1. **L1I miss**: Stalls entire pipeline (IF cannot advance)
+2. **L1D miss**: Stalls MEM stage (blocks preceding instructions)
+3. **Branch mispredict**: Flushes IF and ID (wastes 2 instructions)
+
+<Info>
+The pipeline is **in-order**, meaning instructions must complete in program order. An L1D miss in MEM blocks all preceding stages, even if they could otherwise advance.
+</Info>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Cache Coherence" icon="arrows-rotate" href="/architecture/cache-coherence">
+    Learn how L1D accesses trigger MSI protocol
+  </Card>
+  <Card title="Branch Prediction" icon="code-branch" href="/architecture/branch-prediction">
+    Understand the gshare predictor used in EX
+  </Card>
+</CardGroup>

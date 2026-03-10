@@ -1,0 +1,370 @@
+---
+title: Branch Prediction
+description: gshare predictor with 2-bit saturating counters and global history
+---
+
+The SMP simulator implements a **gshare (global history share)** branch predictor to reduce branch misprediction penalties. Each pipeline contains a dedicated `BranchPredictor` instance that maintains a global history register (GHR) and a table of 2-bit saturating counters.
+
+## gshare Predictor Design
+
+gshare is a **correlated branch predictor** that combines:
+- **Program Counter (PC)**: Identifies the branch instruction
+- **Global History Register (GHR)**: Recent branch outcomes (taken/not-taken)
+
+The predictor XORs PC and GHR to index into a prediction table, allowing it to capture branch correlation patterns.
+
+## BranchPredictor Class
+
+```javascript
+// From pipeline.js:3-26
+class BranchPredictor {
+  constructor(bits = 6) {
+    this.bits = bits;
+    this.mask = (1 << bits) - 1;
+    this.table = Array.from({ length: 1 << bits }, () => 1); // weak not taken
+    this.ghr = 0;
+    this.stats = { hits: 0, total: 0 };
+  }
+
+  predict(pc) {
+    const idx = (pc ^ this.ghr) & this.mask;
+    const counter = this.table[idx];
+    return counter >= 2;
+  }
+
+  update(pc, taken) {
+    const idx = (pc ^ this.ghr) & this.mask;
+    let c = this.table[idx];
+    if (taken && c < 3) c++;
+    if (!taken && c > 0) c--;
+    this.table[idx] = c;
+    this.ghr = ((this.ghr << 1) | (taken ? 1 : 0)) & this.mask;
+  }
+}
+```
+
+### Key Components
+
+- **bits**: Number of bits for indexing (default 6 → 64 entries)
+- **mask**: Bitmask for index calculation (`0b111111` for 6 bits)
+- **table**: Array of 2-bit saturating counters (size = 2^bits)
+- **ghr**: Global History Register (recent branch outcomes)
+- **stats**: Tracks prediction hits and total predictions
+
+## 2-Bit Saturating Counter Table
+
+Each entry in the prediction table is a 2-bit counter with four states:
+
+| Counter Value | State | Prediction |
+|---------------|-------|------------|
+| 0 | Strong Not Taken | Not Taken |
+| 1 | Weak Not Taken | Not Taken |
+| 2 | Weak Taken | Taken |
+| 3 | Strong Taken | Taken |
+
+### Counter Initialization
+
+```javascript
+this.table = Array.from({ length: 1 << bits }, () => 1);
+```
+
+All counters start at **1 (Weak Not Taken)**, a neutral starting point that favors not-taken but adapts quickly.
+
+### State Transitions
+
+```javascript
+// From pipeline.js:18-22 (update method)
+let c = this.table[idx];
+if (taken && c < 3) c++;      // Saturate at 3
+if (!taken && c > 0) c--;     // Saturate at 0
+this.table[idx] = c;
+```
+
+**Transition diagram:**
+```
+     Branch Taken
+        ↓  ↓  ↓
+  0 → 1 → 2 → 3
+  ↑  ↑  ↑  ↑
+    Branch Not Taken
+```
+
+<Note>
+The **2-bit counter** provides hysteresis, requiring two consecutive mispredictions before changing the prediction. This reduces noise from occasional misbehavior.
+</Note>
+
+## Global History Register (GHR)
+
+The GHR is a shift register that records recent branch outcomes:
+
+```javascript
+this.ghr = ((this.ghr << 1) | (taken ? 1 : 0)) & this.mask;
+```
+
+### GHR Update Example (6-bit)
+
+**Initial:** `GHR = 0b000000`
+
+**Branch 1 (taken):**
+```
+GHR = (0b000000 << 1) | 1 = 0b000001
+```
+
+**Branch 2 (not taken):**
+```
+GHR = (0b000001 << 1) | 0 = 0b000010
+```
+
+**Branch 3 (taken):**
+```
+GHR = (0b000010 << 1) | 1 = 0b000101
+```
+
+The GHR retains the last 6 branch outcomes (for 6-bit configuration).
+
+## Prediction
+
+When a branch enters the EX stage, the predictor is queried:
+
+```javascript
+// From pipeline.js:12-15 (predict method)
+predict(pc) {
+  const idx = (pc ^ this.ghr) & this.mask;
+  const counter = this.table[idx];
+  return counter >= 2;
+}
+```
+
+### Index Calculation
+
+```javascript
+const idx = (pc ^ this.ghr) & this.mask;
+```
+
+The index is computed by **XORing the PC with the GHR**, then masking to table size:
+
+**Example (6-bit):**
+- PC = 0x1024 = `0b...010010`
+- GHR = 0b000101
+- XOR = 0b010111 = 23
+- Table[23] accessed
+
+This XOR operation allows the same PC to map to different table entries based on recent branch history, capturing **correlated branches**.
+
+### Prediction Decision
+
+```javascript
+return counter >= 2;
+```
+
+- Counter ≥ 2: Predict **Taken**
+- Counter < 2: Predict **Not Taken**
+
+## Branch Resolution
+
+Branches are resolved in the pipeline's EX stage:
+
+```javascript
+// From pipeline.js:116-129
+if (from === "EX" && instr.op === "branch") {
+  const predicted = this.predictor.predict(instr.addr);
+  const taken = Math.random() < instr.takenProb;
+  this.predictor.update(instr.addr, taken);
+  this.predictor.stats.total++;
+  if ((taken && predicted) || (!taken && !predicted)) {
+    this.predictor.stats.hits++;
+  } else {
+    // Penalize with a 2-cycle flush
+    this.flush = 2;
+    this.stages.IF = null;
+    this.stages.ID = null;
+  }
+}
+```
+
+### Resolution Steps
+
+1. **Predict**: Call `predictor.predict(pc)` to get prediction
+2. **Execute**: Determine actual outcome (random based on `takenProb`)
+3. **Update**: Update counter table and GHR
+4. **Check**: Compare prediction to actual
+5. **Stats**: Increment `total`; if correct, increment `hits`
+6. **Penalty**: If mispredicted, flush pipeline for 2 cycles
+
+<Warning>
+Mispredictions incur a **2-cycle penalty** by flushing the IF and ID stages, creating pipeline bubbles. High misprediction rates severely degrade IPC.
+</Warning>
+
+## Predictor Update
+
+```javascript
+// From pipeline.js:17-25 (update method)
+update(pc, taken) {
+  const idx = (pc ^ this.ghr) & this.mask;
+  let c = this.table[idx];
+  if (taken && c < 3) c++;
+  if (!taken && c > 0) c--;
+  this.table[idx] = c;
+  this.ghr = ((this.ghr << 1) | (taken ? 1 : 0)) & this.mask;
+}
+```
+
+### Update Sequence
+
+1. Compute index using same XOR formula
+2. Increment counter if taken (saturate at 3)
+3. Decrement counter if not taken (saturate at 0)
+4. Update table entry
+5. Shift GHR left and insert actual outcome (1 = taken, 0 = not taken)
+
+## Prediction Accuracy Calculation
+
+Accuracy is computed from predictor statistics:
+
+```javascript
+const accuracy = this.stats.hits / this.stats.total;
+```
+
+**Formula:**
+```
+Accuracy = Correct Predictions / Total Predictions
+```
+
+**Example:**
+- Total branches: 1000
+- Correct predictions: 850
+- Accuracy: 850 / 1000 = 0.85 = **85%**
+
+<Info>
+The simulator aggregates accuracy across all cores. The Processor sums `predictor.stats.hits` and `predictor.stats.total` from all pipelines to compute overall branch accuracy.
+</Info>
+
+## Predictor Configuration
+
+The predictor size is controlled by the `gshareBits` parameter:
+
+```javascript
+const pipe = new Pipeline(idx, l1i, l1d, wl, cfg.gshareBits);
+```
+
+| gshareBits | Table Entries | Memory (bytes) |
+|------------|---------------|----------------|
+| 4 | 16 | 16 |
+| 6 | 64 | 64 |
+| 8 | 256 | 256 |
+| 10 | 1024 | 1024 |
+| 12 | 4096 | 4096 |
+
+<Note>
+Each entry is a 2-bit counter, but JavaScript stores them as numbers (8 bytes). The "Memory" column shows the idealized hardware cost (2 bits per entry).
+</Note>
+
+### Size vs. Accuracy Trade-off
+
+- **Smaller tables**: Cheaper, but more aliasing (different branches map to same entry)
+- **Larger tables**: Better accuracy, but higher cost and potentially slower access
+
+Typical hardware uses 10-14 bits (1K-16K entries) for good accuracy.
+
+## Workload-Specific Behavior
+
+Different workloads have different branch characteristics:
+
+### Vector (`vetor`)
+
+```javascript
+core.push({ op: "branch", addr: addr + 12, takenProb: 0.12 });
+```
+
+- **Taken probability**: 12%
+- **Predictor behavior**: Quickly learns "not taken" (counter → 0)
+- **Expected accuracy**: above 95%
+
+### Matrix Multiply (`matmul`)
+
+```javascript
+core.push({ op: "branch", addr: addr + 12, takenProb: 0.18 });
+```
+
+- **Taken probability**: 18%
+- **Predictor behavior**: Mostly "not taken"
+- **Expected accuracy**: above 90%
+
+### Histogram (`histograma`)
+
+```javascript
+core.push({ op: "branch", addr: addr + 4, takenProb: 0.2 });
+```
+
+- **Taken probability**: 20%
+- **Predictor behavior**: Learns "not taken"
+- **Expected accuracy**: above 85%
+
+### Control Flow (`controle`)
+
+```javascript
+core.push({ op: "branch", addr, takenProb: 0.55 });
+core.push({ op: "branch", addr: addr + 4, takenProb: 0.35 });
+```
+
+- **Taken probability**: 55% and 35% (mixed)
+- **Predictor behavior**: Harder to predict (near 50%)
+- **Expected accuracy**: 70-80%
+
+<Warning>
+The **controle** workload is designed to stress-test the branch predictor with near-random behavior. Even a perfect predictor cannot exceed ~55-65% accuracy on truly random branches.
+</Warning>
+
+## Why gshare?
+
+gshare excels at predicting **correlated branches**, where the outcome of a branch depends on previous branch outcomes.
+
+### Example: Correlated Pattern
+
+```c
+if (a > b) {        // Branch A
+  if (c > d) {      // Branch B
+    ...
+  }
+}
+```
+
+If Branch A is taken, Branch B's behavior may be correlated. gshare captures this:
+
+- If A not taken: GHR = 0b...0, use Table[PC_B XOR 0]
+- If A taken: GHR = 0b...1, use Table[PC_B XOR 1]
+
+Branch B gets **different prediction entries** based on Branch A's outcome.
+
+### Comparison to Simple Predictors
+
+| Predictor | Index | Correlation |
+|-----------|-------|-------------|
+| **Direct-mapped** | PC | None (static) |
+| **gshare** | PC XOR GHR | Global history |
+| **Local** | PC → local history | Per-branch history |
+
+gshare balances hardware cost (single GHR) with good accuracy on correlated branches.
+
+## Limitations
+
+The simulator's branch predictor has some simplifications:
+
+1. **Random execution**: Actual outcome is random, not based on real control flow
+2. **No target prediction**: The simulator doesn't model branch target buffers (BTBs)
+3. **Simplified timing**: Prediction happens in EX, not IF (real hardware predicts earlier)
+
+<Info>
+Despite these simplifications, the predictor demonstrates the **core principles** of gshare: XOR indexing, 2-bit counters, and GHR updates. The accuracy metrics reflect realistic branch prediction behavior.
+</Info>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Pipeline" icon="arrow-progress" href="/architecture/pipeline">
+    Learn how branches are resolved in the EX stage
+  </Card>
+  <Card title="Overview" icon="sitemap" href="/architecture/overview">
+    Return to architecture overview
+  </Card>
+</CardGroup>

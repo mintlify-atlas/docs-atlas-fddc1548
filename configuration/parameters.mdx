@@ -1,0 +1,291 @@
+---
+title: Parameters
+description: Complete reference for all simulator configuration options
+---
+
+The SMP Simulator provides extensive configuration options to explore different system architectures and workload behaviors. All parameters can be adjusted from the configuration panel before starting or after resetting the simulation.
+
+## System Configuration
+
+### Number of Cores
+
+**Parameter**: `coreCount`  
+**Default**: `2`  
+**Valid Range**: 2-4 cores  
+**UI Control**: Dropdown select
+
+```javascript
+// Configuration (main.js:37)
+cores: Number(el.coreCount.value)
+```
+
+Determines the number of processor cores in the SMP system. Each core gets:
+- Private L1I cache (instruction cache)
+- Private L1D cache (data cache)
+- Independent 5-stage in-order pipeline
+- Slice of the workload with equal instruction count
+
+**Performance Impact**:
+- More cores → Higher potential parallelism and speedup
+- More cores → Higher coherence traffic (invalidations, upgrades)
+- Speedup is measured against single-core baseline executing all work
+
+**Recommendation**:
+- Start with 2 cores to understand basic coherence
+- Use 4 cores with `histograma` workload to observe coherence bottlenecks
+
+---
+
+### Workload Selection
+
+**Parameter**: `workload`  
+**Default**: `"vetor"` (vector sum)  
+**Valid Options**:
+- `vetor` - Vector sum (memory + ALU)
+- `matmul` - Matrix multiplication (compute intensive)
+- `histograma` - Histogram (concurrent writes)
+- `controle` - Binary search (branch heavy)
+
+```javascript
+// Configuration (main.js:38)
+workload: el.workload.value
+```
+
+Selects the predefined workload pattern. See [Workloads](/configuration/workloads) for detailed descriptions of each pattern.
+
+**Performance Impact**:
+- Different workloads stress different system components
+- Workload characteristics affect IPC, speedup, MPKI, and coherence traffic
+
+---
+
+## Cache Parameters
+
+### L1I Hit Latency
+
+**Parameter**: `l1iHit`  
+**Default**: `1` cycle  
+**Valid Range**: ≥1 cycle  
+**UI Control**: Number input
+
+```javascript
+// Configuration (main.js:39)
+l1iHit: Number(el.l1iHit.value)
+
+// Applied to instruction cache (processor.js:122)
+const l1i = new Cache({ 
+  hitLatency: this.cfg.l1iHit,
+  isInstruction: true 
+});
+```
+
+Number of cycles for an L1 instruction cache hit. This latency is applied in the **IF (Instruction Fetch)** pipeline stage.
+
+**Performance Impact**:
+- Higher latency → Instructions spend more cycles in IF stage
+- Directly affects IPC for all workloads
+- Minimal impact on coherence (instructions are read-only)
+
+**Typical Values**:
+- Fast SRAM: 1 cycle
+- Slower L1I: 2-3 cycles
+
+---
+
+### L1D Hit Latency
+
+**Parameter**: `l1dHit`  
+**Default**: `2` cycles  
+**Valid Range**: ≥1 cycle  
+**UI Control**: Number input
+
+```javascript
+// Configuration (main.js:40)
+l1dHit: Number(el.l1dHit.value)
+
+// Applied to data cache (processor.js:123)
+const l1d = new Cache({ 
+  hitLatency: this.cfg.l1dHit,
+  bus: this.bus  // Connected to coherence bus
+});
+```
+
+Number of cycles for an L1 data cache hit. This latency is applied in the **MEM (Memory)** pipeline stage for load/store operations.
+
+**Performance Impact**:
+- Higher latency → Load/store operations take more cycles
+- Significant impact on memory-intensive workloads (`vetor`, `histograma`)
+- Less impact on compute-bound workloads (`matmul`)
+
+**Typical Values**:
+- Fast SRAM: 1-2 cycles
+- Slower L1D: 3-4 cycles
+
+---
+
+### Miss Penalty
+
+**Parameter**: `missPenalty`  
+**Default**: `15` cycles  
+**Valid Range**: ≥5 cycles  
+**UI Control**: Number input
+
+```javascript
+// Configuration (main.js:41)
+missPenalty: Number(el.missPenalty.value)
+
+// Applied to both L1I and L1D (processor.js:122-123)
+missPenalty: this.cfg.missPenalty
+```
+
+Additional cycles added when a cache access misses. This represents the time to fetch data from the next level of the memory hierarchy (L2 cache or main memory).
+
+**Total Miss Latency** = Hit Latency + Miss Penalty
+
+For example, with default settings:
+- L1D hit: 2 cycles
+- L1D miss: 2 + 15 = **17 cycles**
+
+**Performance Impact**:
+- Higher penalty → Cache misses become very expensive
+- Dramatically affects workloads with poor spatial locality
+- Increases MPKI (Misses Per Thousand Instructions) impact on IPC
+
+**Typical Values**:
+- L2 cache access: 10-20 cycles
+- Main memory access: 50-100 cycles (not recommended for interactive simulation)
+
+---
+
+### Cache Associativity
+
+**Parameter**: `assoc`  
+**Default**: `2` ways  
+**Valid Range**: 1-4 ways  
+**UI Control**: Number input
+
+```javascript
+// Configuration (main.js:42)
+assoc: Number(el.assoc.value)
+
+// Applied to all caches (processor.js:122-123)
+ways: this.cfg.assoc
+```
+
+Number of ways in the set-associative cache. Both L1I and L1D caches use 32 sets with configurable associativity.
+
+**Cache Configuration**:
+- Sets: 32
+- Block size: 32 bytes
+- Associativity: 1-4 ways
+- Replacement policy: LRU (Least Recently Used)
+
+**Performance Impact**:
+- 1-way (direct-mapped): Fast but high conflict misses
+- 2-way: Good balance for most workloads
+- 4-way: Lower conflict misses, slightly slower lookup
+
+**Recommendation**:
+- Use 1-way to demonstrate conflict misses
+- Use 4-way to minimize cache effects and isolate coherence behavior
+
+---
+
+## Branch Prediction
+
+### gshare Predictor Bits
+
+**Parameter**: `gshareBits`  
+**Default**: `6` bits  
+**Valid Range**: 4-10 bits  
+**UI Control**: Number input
+
+```javascript
+// Configuration (main.js:43)
+gshareBits: Number(el.gshareBits.value)
+
+// Applied to each pipeline's branch predictor (processor.js:125)
+const pipe = new Pipeline(idx, l1i, l1d, wl, this.cfg.gshareBits);
+```
+
+Number of bits used for the gshare branch predictor table. The predictor uses:
+- **Global History Register (GHR)**: Tracks recent branch outcomes
+- **Prediction Table**: 2^bits entries, each with 2-bit saturating counter
+- **Index**: `PC XOR GHR` → predictor table entry
+
+**Predictor Table Size**:
+- 4 bits → 16 entries
+- 6 bits → 64 entries (default)
+- 10 bits → 1024 entries
+
+**Performance Impact**:
+- More bits → Larger table → Better prediction accuracy
+- Better accuracy → Fewer pipeline flushes → Higher IPC
+- Especially important for `controle` workload (branch-heavy)
+
+**Misprediction Penalty**:
+- Pipeline flush: 2 cycles (IF and ID stages cleared)
+- Branch resolved in EX stage
+
+**Recommendation**:
+- Use 4 bits with `controle` workload to see misprediction impact
+- Use 10 bits to minimize branch effects and isolate memory/coherence behavior
+
+---
+
+## Simulation Control
+
+### Cycles Per Tick
+
+**Parameter**: `cyclesPerTick`  
+**Default**: `5` cycles  
+**Valid Range**: 1-20 cycles  
+**UI Control**: Number input
+
+```javascript
+// Simulation loop (main.js:161)
+const steps = Math.max(1, Number(el.cyclesPerTick.value));
+for (let i = 0; i < steps; i++) {
+  sim.step();
+}
+```
+
+Number of simulation cycles executed per animation frame when the simulator is running. This controls simulation speed without affecting results.
+
+**Performance Impact**:
+- Lower values (1-2): Slower execution, easier to follow pipeline visualization
+- Higher values (10-20): Faster execution, harder to observe individual stages
+- Does **not** affect metrics or simulation accuracy
+
+**Recommendation**:
+- Use 1 cycle for detailed pipeline observation
+- Use 10+ cycles for faster completion of long simulations
+
+---
+
+## Parameter Summary Table
+
+| Parameter | Default | Range | Affects | Primary Impact |
+|-----------|---------|-------|---------|----------------|
+| **Cores** | 2 | 2-4 | Parallelism | Speedup, coherence traffic |
+| **Workload** | vetor | 4 options | All metrics | Performance profile |
+| **L1I Hit** | 1 | ≥1 cycle | IF stage | Instruction fetch latency |
+| **L1D Hit** | 2 | ≥1 cycle | MEM stage | Load/store latency |
+| **Miss Penalty** | 15 | ≥5 cycles | Cache misses | MPKI impact on IPC |
+| **Associativity** | 2 | 1-4 ways | Cache conflicts | Miss rate |
+| **gshare Bits** | 6 | 4-10 bits | Branch prediction | Branch accuracy, IPC |
+| **Cycles/Tick** | 5 | 1-20 | Visualization | Simulation speed only |
+
+## Configuration Workflow
+
+1. **Select core count**: Start with 2, increase to observe scaling
+2. **Choose workload**: Pick based on what you want to study
+3. **Set cache parameters**: Adjust latencies and associativity
+4. **Configure branch predictor**: More bits for branch-heavy workloads
+5. **Reset simulation**: Click Reset to apply configuration changes
+6. **Adjust cycles/tick**: Tune visualization speed as needed
+
+## Related Documentation
+
+- [Workloads](/configuration/workloads) - Detailed workload descriptions
+- [Metrics](/configuration/metrics) - Understanding performance measurements

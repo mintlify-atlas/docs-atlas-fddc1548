@@ -1,0 +1,126 @@
+---
+title: Introduction
+description: Learn about the SMP Simulator - an educational browser-based tool for understanding symmetric multiprocessing, cache coherence, and pipeline execution
+---
+
+## What is the SMP Simulator?
+
+The SMP Simulator is an interactive, browser-based educational tool designed to help students and developers understand the fundamentals of **Symmetric Multiprocessing (SMP)** systems. Built entirely in HTML, CSS, and JavaScript, it provides a visual and hands-on approach to learning complex computer architecture concepts.
+
+This simulator models a 2-4 core in-order processor system with private L1 instruction and data caches, implementing the MSI cache coherence protocol via a shared bus.
+
+## Educational Goals
+
+The SMP Simulator helps you understand:
+
+<CardGroup cols={2}>
+  <Card title="Parallel Execution" icon="microchip">
+    Observe how multiple cores execute workloads simultaneously and learn about speedup and parallelism efficiency
+  </Card>
+  
+  <Card title="Cache Coherence" icon="arrows-rotate">
+    Explore the MSI protocol (Modified, Shared, Invalid) and see how cores maintain cache consistency through snooping
+  </Card>
+  
+  <Card title="Pipeline Architecture" icon="timeline">
+    Study 5-stage in-order pipelines (IF, ID, EX, MEM, WB) and understand instruction flow through each stage
+  </Card>
+  
+  <Card title="Performance Metrics" icon="chart-line">
+    Measure IPC, speedup, MPKI, branch prediction accuracy, and coherence overhead in real-time
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Configurable Architecture
+
+- **2-4 CPU cores** with independent in-order pipelines
+- **Private L1I and L1D caches** with configurable associativity (1-4 way)
+- **MSI coherence protocol** with live message tracking
+- **Gshare branch predictor** with configurable history bits (4-10)
+
+### Built-in Workloads
+
+The simulator includes four educational workloads that demonstrate different parallelism patterns:
+
+- **Soma vetorial** - Vector addition with stride-1 memory access
+- **Matmul 64x64** - Matrix multiplication with 64x64 blocks
+- **Histograma** - Multi-threaded histogram with concurrent read/write patterns
+- **Busca binária** - Binary search with frequent branches
+
+### Real-Time Visualization
+
+- Live pipeline state for each core
+- Core utilization and parallelism metrics
+- Cache hit/miss counters
+- MSI coherence event log
+- Interactive step-by-step execution
+
+<Note>
+  The simulator runs entirely in your browser - no installation, compilation, or external dependencies required!
+</Note>
+
+## How It Works
+
+### Pipeline Architecture
+
+Each core implements a **5-stage in-order RISC-V (RV32I) pipeline**:
+
+1. **IF (Instruction Fetch)** - Fetches instructions from L1I cache
+2. **ID (Instruction Decode)** - Decodes instruction and reads registers  
+3. **EX (Execute)** - Performs ALU operations and evaluates branches
+4. **MEM (Memory)** - Accesses L1D cache for loads/stores
+5. **WB (Write Back)** - Commits instruction and writes results
+
+Each stage has configurable latencies. Cache misses add a penalty (default 15 cycles), and branch mispredictions trigger a 2-cycle pipeline flush.
+
+### Cache Coherence (MSI Protocol)
+
+The simulator implements the MSI cache coherence protocol:
+
+- **Modified (M)** - Cache line is modified and exclusive to this core
+- **Shared (S)** - Cache line is clean and may be shared with other cores
+- **Invalid (I)** - Cache line is invalid
+
+When a core writes to a shared line, the coherence bus invalidates copies in other caches and counts the coherence traffic.
+
+### Performance Metrics
+
+The simulator calculates several important metrics:
+
+- **IPC (Instructions Per Cycle)** - Overall throughput efficiency
+- **Speedup** - Performance gain vs. single-core baseline
+- **MPKI (Misses Per Kilo-Instructions)** - L1D cache effectiveness
+- **Branch Accuracy** - Gshare predictor success rate
+- **Coherence Messages** - Protocol overhead (invalidations, upgrades)
+
+## System Requirements
+
+<Card title="Browser Requirements" icon="browser">
+  A modern web browser with JavaScript ES6 module support:
+  - Chrome 61+
+  - Firefox 60+
+  - Safari 11+
+  - Edge 79+
+</Card>
+
+<Warning>
+  For the best experience, use a desktop or laptop computer. Mobile browsers are supported but may have limited screen space for visualizations.
+</Warning>
+
+## Next Steps
+
+<Steps>
+  <Step title="Quick Start">
+    Follow the [Quickstart Guide](/quickstart) to run your first simulation in under 2 minutes
+  </Step>
+  
+  <Step title="Learn the Controls">
+    Read [Running the Simulator](/running-simulator) to understand all controls and metrics
+  </Step>
+  
+  <Step title="Configure Your System">
+    Explore [Configuration Options](/configuration) to customize cores, caches, and workloads
+  </Step>
+</Steps>

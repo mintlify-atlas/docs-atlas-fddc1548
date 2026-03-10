@@ -1,0 +1,414 @@
+---
+title: Running the Simulator
+description: Comprehensive guide to simulator controls, metrics interpretation, and understanding core activity visualization
+---
+
+## Simulator Controls
+
+The SMP Simulator provides three primary control buttons for managing simulation execution. These controls are located in the header section of the interface.
+
+### Start/Pause Button
+
+The **Iniciar/Pausar** button toggles between running and paused states:
+
+```javascript
+// When clicked, the button behavior:
+if (running) {
+  // Pauses the simulation loop
+  running = false;
+  button.textContent = "Iniciar";
+} else {
+  // Starts continuous execution
+  running = true;
+  button.textContent = "Pausar";
+  tick(); // Begins animation frame loop
+}
+```
+
+**When to use:**
+- Start the simulation to observe continuous execution
+- Pause to examine the current state in detail
+- Pause before changing configuration settings
+
+<Note>
+  The simulation advances by **Ciclos por tick** cycles per animation frame. Default is 5 cycles per tick, adjustable from 1-20 in the configuration panel.
+</Note>
+
+### Step Button
+
+The **Step** button advances the simulation by exactly one tick while in paused state:
+
+```javascript
+// Step button executes:
+sim.step();           // Advance by cyclesPerTick cycles
+renderCores();        // Update pipeline visualization
+renderParallelism();  // Update core activity bars
+renderMetrics();      // Update all metrics
+```
+
+**When to use:**
+- Debug specific pipeline behavior cycle-by-cycle
+- Observe cache coherence events in slow motion
+- Understand how instructions flow through pipeline stages
+- Analyze branch misprediction and pipeline flushes
+
+<Warning>
+  For true single-cycle stepping, set **Ciclos por tick** to 1 in the configuration panel before using Step.
+</Warning>
+
+### Reset Button
+
+The **Reset** button rebuilds the simulator with the current configuration:
+
+```javascript
+// Reset button behavior:
+running = false;
+el.start.textContent = "Iniciar";
+buildSimulator(); // Creates new Processor with current config
+// Clears: all metrics, caches, coherence log, utilization history
+```
+
+**When to use:**
+- Apply configuration changes (cores, workload, latencies, etc.)
+- Start a fresh simulation run
+- Clear the coherence log
+- Compare different configurations
+
+<Note>
+  Configuration changes (number of cores, workload type, cache parameters) **only take effect after clicking Reset**.
+</Note>
+
+## Live Metrics Display
+
+The metrics panel provides real-time performance measurements. Understanding these metrics is key to analyzing multiprocessor behavior.
+
+### Core Metrics
+
+#### Ciclos (Cycles)
+
+Total clock cycles elapsed since simulation start or last reset.
+
+```javascript
+// Updated every tick:
+el.cycles.textContent = sim.cycle;
+```
+
+This is the denominator for IPC calculations and the baseline for speedup measurements.
+
+#### Instruções Comprometidas (Committed Instructions)
+
+Count of instructions that successfully completed the WB (Write Back) pipeline stage:
+
+```javascript
+// Instructions commit when:
+// - They reach WB stage
+// - All previous pipeline stages completed
+// - No flush occurred (e.g., branch misprediction)
+const m = sim.metrics;
+el.committed.textContent = m.committed;
+```
+
+**What it means:**
+- Only retired instructions count toward committed
+- Pipeline flushes reduce committed count
+- Higher is better (more work completed)
+
+#### IPC (Instructions Per Cycle)
+
+Measures throughput efficiency across all cores:
+
+```javascript
+// Formula:
+IPC = committed_instructions / cycles
+
+// In code:
+el.ipc.textContent = (m.committed / Math.max(1, sim.cycle)).toFixed(2);
+```
+
+**Interpretation:**
+- **Single core max IPC**: 1.0 (one instruction per cycle)
+- **Dual core max IPC**: 2.0 (perfect parallelism)
+- **Quad core max IPC**: 4.0 (perfect parallelism)
+- **Lower IPC** indicates pipeline stalls, cache misses, or dependencies
+
+<Note>
+  An IPC of 0.5 on a quad-core system means cores are only 12.5% utilized on average - significant room for optimization!
+</Note>
+
+### Parallelism Metrics
+
+#### Speedup
+
+Compares current multi-core performance against a single-core baseline:
+
+```javascript
+// Speedup calculation:
+speedup = baseline_cycles / current_cycles
+
+// Baseline: single core running the aggregated workload
+// Current: N cores running workload partitions
+el.speedup.textContent = m.speedup.toFixed(2);
+```
+
+**Interpretation:**
+- **Speedup = 1.00**: No benefit from multiple cores
+- **Speedup = 2.00**: Perfect 2x speedup on 2 cores (ideal)
+- **Speedup < N (cores)**: Overhead from coherence, contention, or poor parallelism
+- **Speedup > N**: Not possible in this simulator
+
+**Example:**
+```plaintext
+2 cores, Speedup 1.85 → Good parallelism (92.5% efficiency)
+4 cores, Speedup 2.1  → Poor scaling (52.5% efficiency)
+```
+
+#### Coerência (msgs)
+
+Counts all MSI coherence protocol messages:
+
+```javascript
+// Tracked events:
+// - Invalidations (write to shared line)
+// - Upgrades (transition to Modified state)
+// - Snoops (bus reads)
+el.coherence.textContent = m.coherenceMsgs;
+```
+
+**What it means:**
+- **Higher values**: More cache-line sharing and contention
+- **Workload-dependent**: Histograma generates heavy coherence traffic
+- **Trade-off**: Coherence overhead vs. parallel speedup
+
+### Cache and Branch Metrics
+
+#### MPKI (Misses Per Kilo-Instructions)
+
+Measures L1D cache effectiveness:
+
+```javascript
+// Formula:
+const mpki = (m.misses / m.instructions) * 1000;
+el.mpki.textContent = mpki.toFixed(2);
+```
+
+**Interpretation:**
+- **MPKI < 5**: Excellent cache performance
+- **MPKI 5-20**: Moderate miss rate
+- **MPKI > 20**: Poor cache locality or insufficient associativity
+
+<Warning>
+  High MPKI severely impacts performance. Each miss adds the **Penalty miss** cycles (default 15). An MPKI of 20 means 2% of instructions cause 15-cycle stalls.
+</Warning>
+
+#### Branch Accuracy
+
+Gshare branch predictor success rate:
+
+```javascript
+// Formula:
+const accuracy = (m.branch.hits / m.branch.total) * 100;
+el.branchAcc.textContent = `${accuracy.toFixed(1)}%`;
+```
+
+**Interpretation:**
+- **Above 90%**: Excellent prediction (well-behaved branches)
+- **80-90%**: Good prediction
+- **Below 80%**: Poor prediction (random branches or small gshare table)
+
+**Impact:**
+- Each misprediction triggers a 2-cycle pipeline flush
+- Flush discards IF and ID stage instructions
+- Directly reduces IPC
+
+## Understanding Core Activity Visualization
+
+The **Atividade paralela em tempo real** section shows live core utilization.
+
+### Per-Core Activity Bars
+
+Each core displays a horizontal bar indicating pipeline occupancy:
+
+```javascript
+// Utilization calculation per core:
+const busyStages = pipelineStages.filter(s => s.busy).length;
+const totalStages = 5; // IF, ID, EX, MEM, WB
+const utilization = (busyStages / totalStages) * 100;
+```
+
+**Visual indicators:**
+- **Bar width**: Percentage of pipeline stages occupied
+- **Pulsing animation**: Core is actively executing
+- **Gray bar**: Core is idle (no instructions)
+- **Percentage label**: Shows utilization (e.g., "80%" = 4/5 stages busy)
+
+### Parallel Statistics
+
+Three key statistics summarize parallelism:
+
+#### Utilização Média (Average Utilization)
+
+Rolling average of all cores' utilization over the last 100 ticks:
+
+```javascript
+// Calculation:
+const avgUtilNow = coreActivities.reduce((sum, c) => sum + c.utilization, 0) / totalCores;
+utilizationHistory.push(avgUtilNow);
+if (utilizationHistory.length > 100) utilizationHistory.shift();
+
+const avgUtil = utilizationHistory.reduce((a, b) => a + b, 0) / utilizationHistory.length;
+el.avgUtil.textContent = `${avgUtil.toFixed(1)}%`;
+```
+
+**What it means:**
+- **High average (above 70%)**: Cores are well-utilized
+- **Low average (below 40%)**: Significant idle time or contention
+
+#### Núcleos Ativos Agora (Active Cores Now)
+
+Instant snapshot of cores with work in their pipelines:
+
+```javascript
+// A core is active if any pipeline stage has an instruction:
+const hasWork = pipelineStages.some(s => s.busy);
+if (hasWork) activeCores++;
+
+el.activeCores.textContent = `${activeCores}/${totalCores}`;
+```
+
+**Examples:**
+- `4/4` - All cores busy (ideal)
+- `2/4` - Half the cores idle
+- `0/4` - Simulation finished or all stalled
+
+#### Paralelismo Efetivo (Effective Parallelism)
+
+Simply shows the count of active cores:
+
+```javascript
+el.effPar.textContent = `${activeCores.toFixed(2)}x`;
+```
+
+This approximates instantaneous parallelism degree.
+
+## Pipeline State Table
+
+The **Núcleos e pipelines** table shows detailed per-core state:
+
+### Column Breakdown
+
+**Core** - Core identifier badge  
+**Pipeline** - Visual representation of 5 stages:
+
+```plaintext
+[IF:LOAD] [ID:LOAD] [EX:ALU] [MEM:STORE] [WB:ALU]
+   busy     busy      busy      busy       idle
+```
+
+- Each stage shows: `STAGE:OPERATION`
+- **busy** (colored) = Stage contains an instruction
+- **idle** (gray) = Stage is empty (`-`)
+- Operation types: LOAD, STORE, ALU, BRANCH
+
+**L1D hit/miss** - Cache performance counters:  
+```plaintext
+Hit: 245 / Miss: 18
+```
+
+**Instr. atual** - Description of current instruction in WB stage
+
+### Reading Pipeline State
+
+<Steps>
+  <Step title="Identify Active Stages">
+    Colored stages contain instructions. Gray stages with `-` are empty.
+  </Step>
+  
+  <Step title="Track Instruction Flow">
+    Instructions move right through the pipeline each cycle (when not stalled):
+    ```plaintext
+    Cycle N:   [IF:LOAD] [ID:ALU] [EX:-] [MEM:-] [WB:-]
+    Cycle N+1: [IF:ALU]  [ID:LOAD] [EX:ALU] [MEM:-] [WB:-]
+    ```
+  </Step>
+  
+  <Step title="Spot Stalls">
+    If an instruction remains in the same stage across multiple cycles, it's stalled (usually cache miss):
+    ```plaintext
+    Cycle N:   [MEM:LOAD] ← remains = 14 (waiting for L1D miss)
+    Cycle N+1: [MEM:LOAD] ← remains = 13
+    ```
+  </Step>
+</Steps>
+
+## Coherence Log
+
+The **Log de coerência** displays MSI protocol events in real-time:
+
+```plaintext
+Core 0 upgraded 0x1080 to Modified
+Core 1 invalidated 0x1080 due to write from Core 0
+Core 2 fetched 0x1080 in Shared state
+```
+
+**Event types:**
+- **Upgraded to Modified** - Core wrote to a clean line (S→M or I→M)
+- **Invalidated due to write** - Another core wrote, this cache line invalidated
+- **Fetched in Shared** - Load found line shared in another cache
+
+<Note>
+  The log shows the most recent 18 events. Earlier events scroll off the top.
+</Note>
+
+## Basic Troubleshooting
+
+### Simulation Won't Start
+
+**Problem:** Clicking Iniciar does nothing
+
+**Solutions:**
+- Check browser console for JavaScript errors
+- Ensure `modules/` directory exists with `cache.js`, `pipeline.js`, `processor.js`
+- Verify browser supports ES6 modules
+- Try hard refresh (Ctrl+Shift+R)
+
+### Poor Speedup
+
+**Problem:** Speedup much lower than core count
+
+**Causes:**
+- High coherence overhead (check Coerência msgs)
+- Cache thrashing (check MPKI)
+- Workload has limited parallelism
+- Excessive miss penalty causing serialization
+
+**Solutions:**
+- Try different workload (matmul has good parallelism)
+- Increase cache associativity
+- Reduce miss penalty to see ideal case
+
+### Low IPC
+
+**Problem:** IPC much lower than number of cores
+
+**Causes:**
+- Pipeline stalls from cache misses
+- Branch mispredictions causing flushes
+- Workload not utilizing all cores
+
+**Solutions:**
+- Reduce L1D hit latency
+- Increase gshare bits for better prediction
+- Check workload matches core count (histograma needs 4 cores)
+
+### Simulation Runs Too Fast/Slow
+
+**Problem:** Can't observe pipeline behavior
+
+**Solution:** Adjust **Ciclos por tick** in configuration:
+- **Too fast:** Reduce to 1-2 cycles per tick
+- **Too slow:** Increase to 10-20 cycles per tick
+- **Step-by-step:** Set to 1 and use Step button
+
+<Note>
+  The simulator aims for 60 FPS. At 5 cycles/tick, that's 300 cycles/second. Increase for faster simulation of long workloads.
+</Note>

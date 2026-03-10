@@ -1,0 +1,169 @@
+---
+title: Workloads
+description: Built-in workload patterns and their coherence characteristics
+---
+
+The SMP Simulator includes four predefined workloads that demonstrate different performance characteristics and coherence traffic patterns. Each workload is automatically partitioned across cores based on the selected configuration.
+
+## Available Workloads
+
+### Vector Sum (`vetor`)
+
+**Pattern**: Memory-intensive with sequential access and ALU operations
+
+This workload performs a vectorized sum operation with stride-1 memory access, combining memory operations with arithmetic. It demonstrates good spatial locality and moderate coherence traffic.
+
+**Characteristics**:
+- Memory operations: 2 loads + 1 store per iteration
+- ALU operations: 1 per iteration
+- Branch probability: 12% taken
+- Access pattern: Sequential with 16-byte stride
+
+**Generated code per iteration** (modules/processor.js:8-17):
+```javascript
+core.push({ op: "load", addr: addr });      // Load operand A
+core.push({ op: "load", addr: addr + 4 });  // Load operand B
+core.push({ op: "alu", addr: addr });       // Compute sum
+core.push({ op: "store", addr: addr + 8 }); // Store result
+core.push({ op: "branch", addr: addr + 12, takenProb: 0.12 });
+```
+
+### Matrix Multiplication (`matmul`)
+
+**Pattern**: Compute-intensive with tiled access
+
+Simplified 64x64 matrix multiplication using 16 tiles. This workload emphasizes ALU operations with moderate memory access, demonstrating compute-bound behavior.
+
+**Characteristics**:
+- Memory operations: 2 loads + 1 store per tile
+- ALU operations: 2 per tile (multiply-accumulate pattern)
+- Branch probability: 18% taken
+- Access pattern: Blocked/tiled with 64-byte stride
+- Total tiles: 16
+
+**Generated code per tile** (modules/processor.js:19-30):
+```javascript
+core.push({ op: "load", addr });           // Load matrix element A
+core.push({ op: "load", addr: addr + 4 }); // Load matrix element B
+core.push({ op: "alu", addr });            // Multiply
+core.push({ op: "alu", addr });            // Accumulate
+core.push({ op: "store", addr: addr + 8 });
+core.push({ op: "branch", addr: addr + 12, takenProb: 0.18 });
+```
+
+### Histogram (`histograma`)
+
+**Pattern**: Concurrent writes with high coherence traffic
+
+Four threads updating shared histogram buckets (32 buckets total). This workload generates significant coherence traffic due to concurrent reads and writes to the same cache lines.
+
+**Characteristics**:
+- Memory operations: 1 load + 1 store per iteration
+- ALU operations: 1 per iteration (bucket computation)
+- Branch probability: 20% taken
+- Access pattern: Modulo addressing with 8-byte stride
+- Buckets: 32 (addresses repeat via modulo)
+- **High coherence traffic**: Multiple cores frequently write to overlapping buckets
+
+**Generated code per iteration** (modules/processor.js:32-40):
+```javascript
+const addr = base + (i % 32) * 8;  // Bucket address (wraps at 32)
+core.push({ op: "load", addr });    // Read current count
+core.push({ op: "alu", addr });     // Increment count
+core.push({ op: "store", addr });   // Write back
+core.push({ op: "branch", addr: addr + 4, takenProb: 0.2 });
+```
+
+### Binary Search (`controle`)
+
+**Pattern**: Branch-heavy control flow
+
+This workload simulates control-intensive code with frequent branches, stressing the branch predictor and demonstrating the impact of mispredictions.
+
+**Characteristics**:
+- Memory operations: 1 load per iteration
+- ALU operations: 1 per iteration
+- Branch operations: **2 per iteration** (55% and 35% taken probability)
+- Access pattern: Sequential with 12-byte stride
+- **Tests branch predictor**: Multiple branches with different probabilities
+
+**Generated code per iteration** (modules/processor.js:42-50):
+```javascript
+core.push({ op: "branch", addr, takenProb: 0.55 });        // First branch
+core.push({ op: "load", addr });                           // Load data
+core.push({ op: "branch", addr: addr + 4, takenProb: 0.35 }); // Second branch
+core.push({ op: "alu", addr });                            // Process
+```
+
+## Workload Generation
+
+### Core Partitioning
+
+Each workload is divided evenly across the selected number of cores. The total iteration count scales with the number of cores to maintain consistent total work:
+
+```javascript
+const totalIters = 64 * cores;
+const itersPerCore = totalIters / cores;
+```
+
+For example, with 4 cores:
+- Total iterations: 256
+- Iterations per core: 64
+
+### Shared Memory Base
+
+All cores use a **shared base address** (`base = 0`) to ensure multiple cores access the same cache blocks, generating realistic coherence traffic (modules/processor.js:54).
+
+## Coherence Traffic Generation
+
+Coherence messages are triggered by the MSI protocol when multiple cores access the same cache lines:
+
+### Read Operations (`load`)
+- **Cold miss**: Fetch from memory, no coherence message
+- **Shared read**: Snoop detects other cores have the line, transitions to Shared state
+- **Traffic**: Snoop requests broadcast on the coherence bus
+
+### Write Operations (`store`)
+- **Upgrade**: Line in Shared state → Modified state, invalidates other copies
+- **Invalidation**: Line in another core's cache is invalidated
+- **Traffic**: Invalidation messages + upgrade requests
+
+### Workload Comparison
+
+| Workload | Memory Ops | Compute Ops | Branches | Coherence Level |
+|----------|------------|-------------|----------|------------------|
+| `vetor` | High (3/iter) | Low (1/iter) | Low (12%) | Medium |
+| `matmul` | Medium (3/tile) | High (2/tile) | Low (18%) | Low-Medium |
+| `histograma` | High (2/iter) | Low (1/iter) | Medium (20%) | **Very High** |
+| `controle` | Low (1/iter) | Low (1/iter) | **Very High** (2/iter) | Low |
+
+## Use Cases
+
+**Use `vetor` to**:
+- Demonstrate memory-bound workloads
+- Show benefits of cache prefetching
+- Observe moderate coherence traffic
+
+**Use `matmul` to**:
+- Demonstrate compute-bound workloads
+- Show ALU pipeline utilization
+- Observe cache blocking effects
+
+**Use `histograma` to**:
+- Demonstrate coherence bottlenecks
+- Show invalidation/upgrade costs
+- Compare performance with different core counts
+
+**Use `controle` to**:
+- Demonstrate branch prediction effects
+- Show pipeline flush costs
+- Compare gshare configurations
+
+## Related Configuration
+
+Workload performance is affected by:
+- [Cache parameters](/configuration/parameters#cache-parameters) - L1I/L1D hit latency and miss penalty
+- [Branch predictor](/configuration/parameters#branch-prediction) - gshare bits for `controle` workload
+- [Core count](/configuration/parameters#system-configuration) - affects workload partitioning
+
+See [Metrics](/configuration/metrics) to understand how to measure workload performance.

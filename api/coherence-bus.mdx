@@ -1,0 +1,302 @@
+---
+title: CoherenceBus
+description: Coordination bus implementing the MSI cache coherence protocol
+---
+
+## Overview
+
+The `CoherenceBus` class coordinates cache coherence across multiple data caches using a simplified MSI (Modified-Shared-Invalid) protocol. It handles:
+- Cache line invalidation on writes
+- Downgrade from Modified to Shared on read sharing
+- Upgrade from Shared to Modified with invalidation
+- Coherence traffic statistics
+
+## Constructor
+
+```javascript
+new CoherenceBus(onLog)
+```
+
+<ParamField path="onLog" type="function" default="() => {}">
+  Callback function invoked for coherence events. Receives a string message describing the event.
+</ParamField>
+
+**Example:**
+```javascript
+const bus = new CoherenceBus((msg) => {
+  console.log(`[Coherence] ${msg}`);
+});
+```
+
+## Properties
+
+### caches
+
+```javascript
+bus.caches
+```
+
+Array of registered `Cache` instances participating in coherence.
+
+### stats
+
+```javascript
+bus.stats
+```
+
+Object tracking coherence protocol activity:
+
+```javascript
+{
+  traffic: 0,        // Total coherence messages sent
+  invalidations: 0,  // Cache lines invalidated
+  upgrades: 0        // Upgrade requests (S → M)
+}
+```
+
+## Methods
+
+### register(cache)
+
+Registers a cache with the coherence bus.
+
+```javascript
+bus.register(cache)
+```
+
+<ParamField path="cache" type="Cache" required>
+  Cache instance to register
+</ParamField>
+
+**Behavior:**
+- Adds cache to `caches` array
+- Calls `cache.connectBus(this)` to establish bidirectional link
+
+**Note:** Only data caches should be registered. Instruction caches do not participate in coherence.
+
+### snoop(requester, address, isWrite, isInstruction)
+
+Broadcasts a cache access to all registered caches for coherence.
+
+```javascript
+const { shared } = bus.snoop(requester, address, isWrite, isInstruction)
+```
+
+<ParamField path="requester" type="Cache" required>
+  The cache making the request (excluded from snooping)
+</ParamField>
+
+<ParamField path="address" type="number" required>
+  Memory address being accessed
+</ParamField>
+
+<ParamField path="isWrite" type="boolean" required>
+  Whether this is a write operation
+</ParamField>
+
+<ParamField path="isInstruction" type="boolean" default="false">
+  If `true`, bypass coherence and return immediately
+</ParamField>
+
+**Returns:**
+
+```javascript
+{
+  shared: boolean  // True if another cache has the line in S or M state
+}
+```
+
+**Behavior for each snooped cache:**
+
+**If `isWrite` is `true`:**
+- Any cache with line in S or M state: invalidate (`state = "I"`)
+- Increment `stats.invalidations`
+- Increment `stats.traffic`
+- Log: `"Inv {cache.name} para 0x{address}"`
+
+**If `isWrite` is `false` and line is Modified:**
+- Downgrade from M to S (`state = "M"` → `state = "S"`)
+- Increment `stats.traffic`
+- Log: `"Downgrade M->S em {cache.name} para 0x{address}"`
+
+**If `isInstruction` is `true`:**
+- Return `{ shared: false }` immediately without snooping
+
+### upgrade(requester, address)
+
+Invalidates all other caches when upgrading from Shared to Modified.
+
+```javascript
+bus.upgrade(requester, address)
+```
+
+<ParamField path="requester" type="Cache" required>
+  The cache requesting upgrade (excluded from invalidation)
+</ParamField>
+
+<ParamField path="address" type="number" required>
+  Memory address being upgraded
+</ParamField>
+
+**Behavior:**
+- For each cache (except requester) with the line in S or M state:
+  - Invalidate: `state = "I"`
+  - Increment `stats.invalidations`
+  - Increment `stats.upgrades`
+  - Increment `stats.traffic`
+  - Log: `"Upgrade: {requester.name} invalida {cache.name} em 0x{address}"`
+
+**Used when:** A cache has a line in Shared state and needs to perform a write.
+
+## MSI Protocol States
+
+The bus enforces the MSI protocol invariants:
+
+### Modified (M)
+- **Meaning:** Cache has exclusive, dirty copy
+- **Invariant:** All other caches must be Invalid
+- **Transitions:**
+  - **M → S:** On snoop of read from another cache (downgrade)
+  - **M → I:** On snoop of write from another cache (invalidate)
+
+### Shared (S)
+- **Meaning:** Cache has read-only copy, possibly shared with others
+- **Invariant:** No cache can be in Modified state
+- **Transitions:**
+  - **S → M:** On local write via `upgrade()` (invalidates all other copies)
+  - **S → I:** On snoop of write from another cache (invalidate)
+
+### Invalid (I)
+- **Meaning:** Cache line does not contain valid data
+- **Transitions:**
+  - **I → S:** On cache miss for read (may cause M→S downgrade)
+  - **I → M:** On cache miss for write (invalidates all other copies)
+
+## Example: MSI Protocol Flow
+
+```javascript
+import { Cache, CoherenceBus } from './modules/cache.js';
+
+const events = [];
+const bus = new CoherenceBus((msg) => events.push(msg));
+
+// Create three caches
+const cores = [0, 1, 2].map(i => {
+  const cache = new Cache({
+    name: `L1D-${i}`,
+    sets: 32,
+    ways: 2,
+    hitLatency: 1,
+    missPenalty: 10
+  });
+  bus.register(cache);
+  return cache;
+});
+
+const addr = 0x1000;
+let cycle = 0;
+
+// === Scenario 1: Shared reads ===
+console.log('\n=== Core 0 reads 0x1000 (I → S) ===');
+cores[0].access(addr, { isWrite: false, cycle: cycle++ });
+console.log('Core 0 state:', cores[0].lookup(addr)?.state);  // S
+
+console.log('\n=== Core 1 reads 0x1000 (I → S, no downgrade) ===');
+cores[1].access(addr, { isWrite: false, cycle: cycle++ });
+console.log('Core 0 state:', cores[0].lookup(addr)?.state);  // S
+console.log('Core 1 state:', cores[1].lookup(addr)?.state);  // S
+console.log('Events:', events);
+events.length = 0;
+
+// === Scenario 2: Write causes upgrade ===
+console.log('\n=== Core 0 writes 0x1000 (S → M, invalidates Core 1) ===');
+cores[0].access(addr, { isWrite: true, cycle: cycle++ });
+console.log('Core 0 state:', cores[0].lookup(addr)?.state);  // M
+console.log('Core 1 state:', cores[1].lookup(addr)?.state);  // I
+console.log('Events:', events);
+// ["Upgrade: L1D-0 invalida L1D-1 em 0x1000"]
+events.length = 0;
+
+// === Scenario 3: Read causes downgrade ===
+console.log('\n=== Core 2 reads 0x1000 (I → S, downgrades Core 0 M → S) ===');
+cores[2].access(addr, { isWrite: false, cycle: cycle++ });
+console.log('Core 0 state:', cores[0].lookup(addr)?.state);  // S
+console.log('Core 2 state:', cores[2].lookup(addr)?.state);  // S
+console.log('Events:', events);
+// ["Downgrade M->S em L1D-0 para 0x1000"]
+events.length = 0;
+
+// === Scenario 4: Write to invalid causes broadcast invalidation ===
+console.log('\n=== Core 1 writes 0x1000 (I → M, invalidates all) ===');
+cores[1].access(addr, { isWrite: true, cycle: cycle++ });
+console.log('Core 0 state:', cores[0].lookup(addr)?.state);  // I
+console.log('Core 1 state:', cores[1].lookup(addr)?.state);  // M
+console.log('Core 2 state:', cores[2].lookup(addr)?.state);  // I
+console.log('Events:', events);
+// ["Inv L1D-0 para 0x1000", "Inv L1D-2 para 0x1000"]
+
+// Print final statistics
+console.log('\n=== Bus Statistics ===');
+console.log('Total traffic:', bus.stats.traffic);
+console.log('Invalidations:', bus.stats.invalidations);
+console.log('Upgrades:', bus.stats.upgrades);
+```
+
+## Implementation Notes
+
+### Broadcast Snooping
+
+The bus uses a **broadcast snooping** model:
+- Every access triggers snooping on all registered caches
+- No directory or filtering
+- Simple but scalable to small core counts (2-8 cores)
+
+### Atomic Operations
+
+All coherence operations are atomic:
+- `snoop()` and `upgrade()` complete instantly
+- No queuing or delayed invalidations
+- State transitions are immediate
+
+### No Writeback
+
+The simulation does not model:
+- Writeback of dirty data on eviction
+- Memory latency for fetching from DRAM
+- Shared L2/L3 caches
+
+All misses pay a fixed `missPenalty` regardless of coherence state.
+
+### Instruction Caches
+
+Instruction caches are explicitly excluded from coherence:
+```javascript
+if (isInstruction) return { shared: false };
+```
+
+This is realistic because:
+- Instruction memory is typically read-only
+- Self-modifying code is rare in modern systems
+
+## Performance Analysis
+
+Use the bus statistics to analyze coherence overhead:
+
+```javascript
+const totalAccesses = cores.reduce((sum, c) => 
+  sum + c.l1d.stats.hits + c.l1d.stats.misses, 0
+);
+
+const coherenceRate = bus.stats.traffic / totalAccesses;
+const invalidationRate = bus.stats.invalidations / totalAccesses;
+const upgradeRate = bus.stats.upgrades / totalAccesses;
+
+console.log(`Coherence messages per access: ${coherenceRate.toFixed(2)}`);
+console.log(`Invalidation rate: ${(invalidationRate * 100).toFixed(1)}%`);
+console.log(`Upgrade rate: ${(upgradeRate * 100).toFixed(1)}%`);
+```
+
+High coherence traffic indicates:
+- Shared data being written by multiple cores (true sharing)
+- False sharing (different data in same cache line)
+- Small cache capacity causing frequent evictions

@@ -1,80 +1,164 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart Guide
+description: Get started with the SMP Simulator in under 2 minutes - run your first multicore simulation
 ---
 
-## Get started in three steps
+## Run Your First Simulation
 
-Get your documentation site running locally and make your first customization.
+The SMP Simulator requires no installation or setup. Follow these steps to start exploring symmetric multiprocessing in your browser.
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Open the Simulator">
+    Navigate to the simulator directory and open `index.html` in your web browser:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    # Option 1: Open directly in your default browser
+    open index.html
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    # Option 2: On Linux
+    xdg-open index.html
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    # Option 3: On Windows
+    start index.html
+    ```
+    
+    Alternatively, you can drag and drop `index.html` directly into your browser window.
+    
+    <Note>
+      The simulator runs entirely client-side - no web server needed!
+    </Note>
+  </Step>
+  
+  <Step title="Review the Default Configuration">
+    When the simulator loads, you'll see the configuration panel on the left side:
+    
+    - **Núcleos**: 2 (number of CPU cores)
+    - **Workload**: Soma vetorial (vector addition)
+    - **L1I hit**: 1 cycle (instruction cache latency)
+    - **L1D hit**: 2 cycles (data cache latency)
+    - **Penalty miss**: 15 cycles (cache miss penalty)
+    - **Assoc. L1**: 2-way (cache associativity)
+    - **Predição**: 6 bits (gshare predictor table size)
+    - **Ciclos por tick**: 5 (simulation speed)
+    
+    These default settings provide a good balance for learning basic SMP concepts.
+  </Step>
+  
+  <Step title="Start the Simulation">
+    Click the **Iniciar** (Start) button in the top-right corner to begin the simulation.
+    
+    You'll see:
+    - The button changes to **Pausar** (Pause)
+    - Metrics start updating in real-time
+    - Core pipeline stages show activity
+    - The coherence log displays MSI protocol events
+    
+    The simulator will automatically advance 5 cycles per tick (configurable).
+  </Step>
+  
+  <Step title="Observe the Metrics">
+    Watch the live metrics panel update as the simulation runs:
+    
+    ```plaintext
+    Ciclos: 245                    # Total cycles executed
+    Instruções comprometidas: 89   # Instructions completed
+    IPC: 0.36                      # Instructions per cycle
+    Speedup: 1.00                  # Performance vs baseline
+    Coerência (msgs): 12           # Coherence protocol messages
+    MPKI: 4.23                     # L1D misses per 1000 instructions
+    Branch acc.: 87.5%             # Branch prediction accuracy
+    ```
+    
+    <Note>
+      **IPC** starts low and increases as cores fill their pipelines. **Speedup** shows the performance benefit of using multiple cores compared to a single-core baseline.
+    </Note>
+  </Step>
+  
+  <Step title="Explore the Visualization">
+    Scroll down to see three key visualization sections:
+    
+    **Atividade paralela em tempo real** - Shows per-core utilization:
+    - Each bar represents one core's pipeline occupancy
+    - Percentage indicates how many pipeline stages are busy
+    - Pulsing animation shows active cores
+    
+    **Núcleos e pipelines** - Displays detailed pipeline state:
+    - Each row shows one core's 5 pipeline stages (IF, ID, EX, MEM, WB)
+    - Stage color indicates the operation type (ALU, LOAD, STORE, BRANCH)
+    - Cache hit/miss counters for L1D
+    
+    **Log de coerência** - MSI protocol events:
+    ```plaintext
+    Core 1 invalidated 0x1020 due to write from Core 0
+    Core 0 upgraded 0x1020 to Modified
+    ```
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Understanding the UI Elements
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+### Control Buttons
 
-### Step 3: Go live
+The simulator provides three main control buttons:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+<CardGroup cols={3}>
+  <Card title="Iniciar/Pausar" icon="play">
+    Starts or pauses continuous simulation. The simulator advances by `Ciclos por tick` cycles each frame.
+  </Card>
+  
+  <Card title="Step" icon="forward-step">
+    Advances the simulation by a single tick (default 5 cycles) while paused. Useful for detailed step-by-step analysis.
+  </Card>
+  
+  <Card title="Reset" icon="rotate-left">
+    Resets the simulation with the current configuration. Clears all metrics, caches, and the coherence log.
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+### Configuration Panel
+
+All settings can be changed at any time. Click **Reset** to apply new configuration:
+
+```javascript
+// Example: Change to 4 cores running matrix multiplication
+Núcleos: 4
+Workload: Matmul 64x64 (blocos)
+```
+
+<Warning>
+  Configuration changes only take effect after clicking **Reset**. The simulator does not support hot-swapping configuration during a running simulation.
+</Warning>
+
+### Metrics Panel
+
+The metrics panel updates in real-time as the simulation runs:
+
+- **Ciclos** - Total clock cycles elapsed
+- **Instruções comprometidas** - Instructions successfully retired from WB stage
+- **IPC** - Committed instructions ÷ cycles (higher is better)
+- **Speedup** - `baseline_cycles / current_cycles` (measures parallelism gain)
+- **Coerência (msgs)** - Total invalidations, upgrades, and snoops
+- **MPKI** - L1D misses per 1000 instructions (lower is better)
+- **Branch acc.** - Gshare predictor accuracy percentage
+
+## Next Steps
+
+Now that you've run your first simulation, you can:
+
+<CardGroup cols={2}>
+  <Card title="Master the Controls" icon="sliders" href="/running-simulator">
+    Learn advanced control techniques and how to interpret all metrics
+  </Card>
+  
+  <Card title="Configure the System" icon="gear" href="/configuration/parameters">
+    Customize cores, caches, latencies, and workloads to experiment with different scenarios
+  </Card>
+  
+  <Card title="Understand MSI Coherence" icon="network-wired" href="/architecture/cache-coherence">
+    Deep dive into the MSI protocol and how caches stay consistent
+  </Card>
+  
+  <Card title="Explore Workloads" icon="code" href="/configuration/workloads">
+    Learn about the built-in workloads and their parallelism characteristics
+  </Card>
+</CardGroup>

@@ -1,0 +1,381 @@
+---
+title: Metrics
+description: Detailed explanation of performance metrics and their calculations
+---
+
+The SMP Simulator provides real-time performance metrics to help you understand system behavior. All metrics are calculated and displayed live during simulation.
+
+## Core Performance Metrics
+
+### Cycles
+
+**Display**: `cycles`  
+**Calculation**: Incremented every simulation step  
+**Code**: main.js:147
+
+```javascript
+el.cycles.textContent = sim.cycle;
+```
+
+Total number of clock cycles elapsed since the simulation started. This is the global time counter for the entire system.
+
+**Interpretation**:
+- Lower cycles for same workload = better performance
+- Used as denominator for IPC calculation
+- Used in speedup calculation (baseline_cycles / current_cycles)
+
+---
+
+### Committed Instructions
+
+**Display**: `committed`  
+**Calculation**: Sum of instructions retired from all cores  
+**Code**: processor.js:137, main.js:148
+
+```javascript
+// Per step, accumulate committed instructions from all cores
+for (const core of this.cores) {
+  committed += core.pipe.step(this.cycle);
+}
+this.metrics.committed += committed;
+```
+
+Total number of instructions that have successfully completed the **WB (Write Back)** stage across all pipelines. Instructions are counted when they retire, not when they enter the pipeline.
+
+**Interpretation**:
+- Total useful work completed
+- Used as numerator for IPC calculation
+- Compare to total instructions to track progress
+- Does not include flushed instructions (e.g., after branch misprediction)
+
+---
+
+### IPC (Instructions Per Cycle)
+
+**Display**: `ipc`  
+**Calculation**: Committed instructions divided by elapsed cycles  
+**Code**: main.js:149
+
+```javascript
+const ipc = m.committed / Math.max(1, sim.cycle);
+el.ipc.textContent = ipc.toFixed(2);
+```
+
+**Formula**:
+```
+IPC = Total Committed Instructions / Total Cycles
+```
+
+**Interpretation**:
+- **IPC = 1.0**: Average of 1 instruction completes per cycle (good for in-order)
+- **IPC > 1.0**: Multiple cores retiring in parallel (ideal parallelism)
+- **IPC < 1.0**: Pipeline stalls dominate (cache misses, branch mispredictions)
+
+**Factors that decrease IPC**:
+- Cache misses (especially with high miss penalty)
+- Branch mispredictions (2-cycle flush penalty)
+- Coherence traffic (invalidations cause additional latency)
+- Pipeline bubbles from dependencies
+
+**Typical Values**:
+- 2 cores, ideal: ~2.0
+- 2 cores, with misses: 0.8-1.5
+- 4 cores, ideal: ~4.0
+- 4 cores, with coherence bottlenecks: 1.5-3.0
+
+---
+
+### Speedup
+
+**Display**: `speedup`  
+**Calculation**: Baseline cycles divided by current cycles  
+**Code**: processor.js:145-147, main.js:150
+
+```javascript
+// Baseline calculated once at initialization (processor.js:116)
+this.baselineCycles = simulateBaseline(flat, this.cfg);
+
+// Speedup calculated each step
+if (this.baselineCycles) {
+  this.metrics.speedup = this.baselineCycles / Math.max(1, this.cycle);
+}
+```
+
+**Formula**:
+```
+Speedup = Baseline Execution Cycles / Parallel Execution Cycles
+```
+
+**Baseline Calculation** (processor.js:73-86):
+- Concatenates all workloads into single instruction stream
+- Simulates on single core with same configuration (caches, latencies)
+- Measures total cycles to completion
+- Represents "sequential execution" performance
+
+**Interpretation**:
+- **Speedup = 1.0**: No benefit from parallelism (sequential equivalent)
+- **Speedup = 2.0**: Twice as fast as single core (ideal for 2 cores)
+- **Speedup > N**: Super-linear (rare, due to cache effects)
+- **Speedup < N**: Sub-linear (normal due to coherence overhead)
+
+**Amdahl's Law**:
+```
+Max Speedup = 1 / (S + P/N)
+```
+Where:
+- S = Serial fraction
+- P = Parallel fraction
+- N = Number of cores
+
+**Factors that reduce speedup**:
+- **Coherence traffic**: Invalidations and upgrades add cycles
+- **Load imbalance**: Some cores finish before others
+- **Synchronization**: Workload dependencies limit parallelism
+- **Cache contention**: Multiple cores competing for same lines
+
+**Typical Values**:
+- 2 cores: 1.5-1.9x (75-95% efficiency)
+- 4 cores: 2.5-3.5x (62-87% efficiency)
+- Histogram workload: Lower speedup due to high coherence traffic
+
+---
+
+## Memory Hierarchy Metrics
+
+### MPKI (Misses Per Thousand Instructions)
+
+**Display**: `mpki`  
+**Calculation**: L1D misses per 1000 total instructions  
+**Code**: main.js:152-154
+
+```javascript
+// Aggregate misses from all L1D caches (processor.js:139)
+const missSum = this.cores.reduce((acc, c) => acc + c.l1d.stats.misses, 0);
+this.metrics.misses = missSum;
+
+// Calculate MPKI (main.js:152-154)
+const totalInstr = m.instructions;
+const mpki = totalInstr === 0 ? 0 : (m.misses / totalInstr) * 1000;
+el.mpki.textContent = mpki.toFixed(2);
+```
+
+**Formula**:
+```
+MPKI = (Total L1D Misses / Total Instructions) × 1000
+```
+
+**Note**: This is an **approximation** because:
+- Denominator uses total instructions in workload, not committed instructions
+- Provides upper bound on miss rate
+- Actual MPKI improves as simulation progresses
+
+**Interpretation**:
+- **MPKI = 0**: Perfect cache behavior (all hits)
+- **MPKI = 1-5**: Excellent locality
+- **MPKI = 10-20**: Moderate miss rate
+- **MPKI > 50**: Poor locality or small cache
+
+**Impact on IPC**:
+```
+Estimated IPC Impact = 1 / (1 + MPKI × MissPenalty / 1000)
+```
+
+For example, with MPKI=20 and penalty=15:
+```
+IPC Impact ≈ 1 / (1 + 20 × 15 / 1000) = 1 / 1.3 ≈ 0.77
+```
+
+**Factors that increase MPKI**:
+- Low cache associativity (conflict misses)
+- Poor spatial locality (workload dependent)
+- Small cache size (32 sets × ways × 32 bytes)
+- High coherence traffic (invalidations cause capacity misses)
+
+---
+
+## Coherence Metrics
+
+### Coherence Messages
+
+**Display**: `coherence`  
+**Calculation**: Sum of traffic, invalidations, and upgrades  
+**Code**: processor.js:144, main.js:151
+
+```javascript
+// Coherence bus tracks three counters
+this.metrics.coherenceMsgs = 
+  this.bus.stats.traffic +        // Snoop requests
+  this.bus.stats.invalidations +  // Cache line invalidations
+  this.bus.stats.upgrades;        // Shared → Modified transitions
+```
+
+**Components**:
+
+#### Traffic (Snoop Requests)
+Broadcast messages when a core reads a cache line. Asks other cores if they have the line.
+- Generated by: Load operations that miss in local cache
+- Purpose: Detect sharing and establish Shared state
+
+#### Invalidations
+Messages that force other cores to invalidate their copy of a cache line.
+- Generated by: Store operations to Shared lines
+- Purpose: Enforce MSI protocol (only one Modified copy)
+- **Most expensive**: Causes cache misses in other cores
+
+#### Upgrades
+Transitions from Shared to Modified state when writing to a shared line.
+- Generated by: Store operations
+- Purpose: Acquire exclusive ownership for writing
+- Triggers: Invalidations to other cores
+
+**Interpretation**:
+- **Low coherence msgs**: Good workload locality, minimal sharing
+- **High coherence msgs**: Significant sharing, potential bottleneck
+- **msgs > committed instructions**: Heavy coherence overhead
+
+**Workload Comparison**:
+- `vetor`: Moderate (sequential sharing)
+- `matmul`: Low (compute-bound, less sharing)
+- `histograma`: **Very High** (concurrent writes to same buckets)
+- `controle`: Low (minimal data sharing)
+
+---
+
+## Branch Prediction Metrics
+
+### Branch Accuracy
+
+**Display**: `branchAcc`  
+**Calculation**: Percentage of correct predictions  
+**Code**: processor.js:140-143, main.js:155-156
+
+```javascript
+// Aggregate branch stats from all cores (processor.js:140-143)
+const branchHits = this.cores.reduce(
+  (acc, c) => acc + c.pipe.predictor.stats.hits, 0
+);
+const branchTotal = this.cores.reduce(
+  (acc, c) => acc + c.pipe.predictor.stats.total, 0
+);
+this.metrics.branch = { hits: branchHits, total: branchTotal };
+
+// Calculate accuracy percentage (main.js:155-156)
+const acc = m.branch.total === 0 ? 0 : (m.branch.hits / m.branch.total) * 100;
+el.branchAcc.textContent = `${acc.toFixed(1)}%`;
+```
+
+**Formula**:
+```
+Branch Accuracy = (Correct Predictions / Total Branches) × 100%
+```
+
+**gshare Predictor**:
+- 2-bit saturating counters per table entry
+- Index = `PC XOR Global_History_Register`
+- States: Strongly Not Taken (00), Weakly Not Taken (01), Weakly Taken (10), Strongly Taken (11)
+
+**Interpretation**:
+- **90-95%**: Excellent prediction (typical for biased branches)
+- **80-90%**: Good prediction
+- **70-80%**: Moderate prediction (mixed branch behavior)
+- **Below 70%**: Poor prediction (random or pathological patterns)
+
+**Misprediction Cost**:
+- Pipeline flush: 2 cycles (IF and ID stages cleared)
+- Branch resolved in EX stage
+- Flushed instructions do **not** count toward committed instructions
+
+**Impact on IPC**:
+```
+Misprediction Rate = 1 - Accuracy
+Branch Frequency = Branches / Instructions
+IPC Impact = 1 / (1 + Misprediction_Rate × Branch_Frequency × Flush_Penalty)
+```
+
+For `controle` workload with 75% accuracy:
+```
+Misprediction Rate = 0.25
+Branch Frequency ≈ 0.5 (2 branches per 4 instructions)
+IPC Impact ≈ 1 / (1 + 0.25 × 0.5 × 2) = 1 / 1.25 = 0.8
+```
+
+---
+
+## Real-Time vs Cumulative
+
+### Cumulative Metrics
+Always increasing, measured since simulation start:
+- **Cycles**: Total elapsed time
+- **Committed**: Total instructions completed
+- **Coherence Messages**: Total coherence traffic
+
+### Derived Metrics
+Calculated from cumulative values:
+- **IPC**: committed / cycles (average over entire run)
+- **Speedup**: baseline / cycles (current speedup)
+- **MPKI**: (misses / instructions) × 1000
+- **Branch Accuracy**: (hits / total) × 100%
+
+### Instantaneous Metrics
+Not directly shown but observable in pipeline visualization:
+- Active cores per cycle
+- Pipeline utilization
+- Cache hit/miss per access
+
+---
+
+## Metrics Dashboard
+
+The UI displays 7 key metrics in real-time (index.html:66-100):
+
+```html
+<div class="card">
+  <p class="label">Cycles</p>
+  <p class="value" id="cycles">0</p>
+</div>
+<!-- Committed, IPC, Speedup, Coherence, MPKI, Branch Accuracy -->
+```
+
+---
+
+## Interpreting Results
+
+### High Performance Scenario
+- **IPC**: Close to number of cores
+- **Speedup**: Close to number of cores
+- **MPKI**: Low (below 10)
+- **Coherence**: Low relative to committed instructions
+- **Branch Accuracy**: High (above 85%)
+
+**Example**: `matmul` workload with 2 cores, 4-way cache, 8-bit gshare
+
+### Coherence-Bound Scenario
+- **IPC**: Much lower than core count
+- **Speedup**: Sub-linear scaling
+- **Coherence**: Very high (> committed instructions)
+- **MPKI**: Elevated due to invalidations
+
+**Example**: `histograma` workload with 4 cores
+
+### Memory-Bound Scenario
+- **IPC**: Low (below 1.0 even with multiple cores)
+- **MPKI**: High (above 20)
+- **Coherence**: Variable
+- Performance sensitive to miss penalty
+
+**Example**: `vetor` workload with high miss penalty (50+ cycles)
+
+### Branch-Bound Scenario
+- **IPC**: Limited by branch mispredictions
+- **Branch Accuracy**: Low (below 80%)
+- **Coherence**: Low (control flow doesn't share data)
+- Performance improves with more gshare bits
+
+**Example**: `controle` workload with 4-bit gshare
+
+---
+
+## Related Documentation
+
+- [Workloads](/configuration/workloads) - How workloads generate different metric profiles
+- [Parameters](/configuration/parameters) - Configuration options that affect metrics
