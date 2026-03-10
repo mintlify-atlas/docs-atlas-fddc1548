@@ -62,7 +62,7 @@ el.ipc.textContent = ipc.toFixed(2);
 ```
 
 **Formula**:
-```
+```text
 IPC = Total Committed Instructions / Total Cycles
 ```
 
@@ -102,7 +102,7 @@ if (this.baselineCycles) {
 ```
 
 **Formula**:
-```
+```text
 Speedup = Baseline Execution Cycles / Parallel Execution Cycles
 ```
 
@@ -160,7 +160,7 @@ el.mpki.textContent = mpki.toFixed(2);
 ```
 
 **Formula**:
-```
+```text
 MPKI = (Total L1D Misses / Total Instructions) × 1000
 ```
 
@@ -265,28 +265,7 @@ el.branchAcc.textContent = `${acc.toFixed(1)}%`;
 ```
 
 **Formula**:
-```
-Branch Accuracy = (Correct Predictions / Total Branches) × 100%
-```
-
-**gshare Predictor**:
-- 2-bit saturating counters per table entry
-- Index = `PC XOR Global_History_Register`
-- States: Strongly Not Taken (00), Weakly Not Taken (01), Weakly Taken (10), Strongly Taken (11)
-
-**Interpretation**:
-- **90-95%**: Excellent prediction (typical for biased branches)
-- **80-90%**: Good prediction
-- **70-80%**: Moderate prediction (mixed branch behavior)
-- **Below 70%**: Poor prediction (random or pathological patterns)
-
-**Misprediction Cost**:
-- Pipeline flush: 2 cycles (IF and ID stages cleared)
-- Branch resolved in EX stage
-- Flushed instructions do **not** count toward committed instructions
-
-**Impact on IPC**:
-```
+```text
 Misprediction Rate = 1 - Accuracy
 Branch Frequency = Branches / Instructions
 IPC Impact = 1 / (1 + Misprediction_Rate × Branch_Frequency × Flush_Penalty)

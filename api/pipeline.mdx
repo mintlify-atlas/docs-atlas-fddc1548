@@ -183,6 +183,10 @@ const snap = pipeline.snapshot()
 
 ## Branch Predictor
 
+<Note>
+The `BranchPredictor` class is **not exported** from the module. It's an internal class used by `Pipeline`. You cannot instantiate it directly - it's automatically created when you construct a `Pipeline` instance.
+</Note>
+
 The `BranchPredictor` class implements a gshare predictor with 2-bit saturating counters.
 
 ### Constructor
